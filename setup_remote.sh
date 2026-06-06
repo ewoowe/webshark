@@ -50,9 +50,7 @@ fi
 
 # 检测操作系统
 echo -e "${YELLOW}[1/5]${NC} 检测远程操作系统..."
-OS=$(sshpass -p "$PASSWORD" ssh -o StrictHostKeyChecking=no ${USERNAME}@${HOST} "uname -s" 2>/dev/null)
-
-if [ $? -ne 0 ]; then
+if ! OS=$(sshpass -p "$PASSWORD" ssh -o StrictHostKeyChecking=no "${USERNAME}"@"${HOST}" "uname -s" 2>/dev/null); then
     echo -e "${RED}错误: 无法连接到远程主机${NC}"
     exit 1
 fi
@@ -62,7 +60,7 @@ echo ""
 
 # 查找 tcpdump 路径
 echo -e "${YELLOW}[2/5]${NC} 查找 tcpdump 路径..."
-TCPDUMP_PATH=$(sshpass -p "$PASSWORD" ssh -o StrictHostKeyChecking=no ${USERNAME}@${HOST} "which tcpdump" 2>/dev/null)
+TCPDUMP_PATH=$(sshpass -p "$PASSWORD" ssh -o StrictHostKeyChecking=no "${USERNAME}"@"${HOST}" "which tcpdump" 2>/dev/null)
 
 if [ -z "$TCPDUMP_PATH" ]; then
     echo -e "${RED}错误: tcpdump 未安装在远程主机上${NC}"
@@ -82,9 +80,7 @@ echo ""
 
 # 测试当前 sudo 权限
 echo -e "${YELLOW}[3/5]${NC} 测试当前 sudo 权限..."
-sshpass -p "$PASSWORD" ssh -o StrictHostKeyChecking=no ${USERNAME}@${HOST} "sudo -n $TCPDUMP_PATH --version" > /dev/null 2>&1
-
-if [ $? -eq 0 ]; then
+if sshpass -p "$PASSWORD" ssh -o StrictHostKeyChecking=no "${USERNAME}"@"${HOST}" "sudo -n $TCPDUMP_PATH --version" > /dev/null 2>&1; then
     echo -e "${GREEN}✓ sudo 权限已正确配置（无需密码）${NC}"
     echo ""
     echo -e "${GREEN}配置完成！${NC}"
@@ -109,9 +105,7 @@ fi
 # 尝试创建 sudoers 配置文件
 CONFIG_CMD="echo '${USERNAME} ALL=(ALL) NOPASSWD: ${TCPDUMP_PATH}' | sudo tee ${SUDOERS_FILE} && sudo chmod 440 ${SUDOERS_FILE}"
 
-sshpass -p "$PASSWORD" ssh -o StrictHostKeyChecking=no ${USERNAME}@${HOST} "$CONFIG_CMD" > /dev/null 2>&1
-
-if [ $? -eq 0 ]; then
+if sshpass -p "$PASSWORD" ssh -o StrictHostKeyChecking=no "${USERNAME}"@"${HOST}" "$CONFIG_CMD" > /dev/null 2>&1; then
     echo -e "${GREEN}✓ sudoers 配置成功${NC}"
 else
     echo -e "${YELLOW}⚠ 自动配置失败，尝试其他方法...${NC}"
@@ -119,9 +113,7 @@ else
     # 尝试使用 visudo
     VISUDO_CMD="echo '${USERNAME} ALL=(ALL) NOPASSWD: ${TCPDUMP_PATH}' | sudo EDITOR='tee -a' visudo"
     
-    sshpass -p "$PASSWORD" ssh -o StrictHostKeyChecking=no ${USERNAME}@${HOST} "$VISUDO_CMD" > /dev/null 2>&1
-    
-    if [ $? -eq 0 ]; then
+    if sshpass -p "$PASSWORD" ssh -o StrictHostKeyChecking=no "${USERNAME}"@"${HOST}" "$VISUDO_CMD" > /dev/null 2>&1; then
         echo -e "${GREEN}✓ visudo 配置成功${NC}"
     else
         echo -e "${RED}✗ 自动配置失败${NC}"
@@ -152,9 +144,7 @@ fi
 echo -e "${YELLOW}[5/5]${NC} 验证配置..."
 sleep 1
 
-sshpass -p "$PASSWORD" ssh -o StrictHostKeyChecking=no ${USERNAME}@${HOST} "sudo -n $TCPDUMP_PATH --version" > /dev/null 2>&1
-
-if [ $? -eq 0 ]; then
+if sshpass -p "$PASSWORD" ssh -o StrictHostKeyChecking=no "${USERNAME}"@"${HOST}" "sudo -n $TCPDUMP_PATH --version" > /dev/null 2>&1; then
     echo -e "${GREEN}✓ 验证成功！${NC}"
     echo ""
     echo -e "${GREEN}========================================${NC}"

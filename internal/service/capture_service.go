@@ -9,8 +9,9 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
-	
+
 	"github.com/gorilla/websocket"
 )
 
@@ -36,6 +37,7 @@ var (
 
 // PacketData 表示一个捕获的数据包
 type PacketData struct {
+	Frame     int               `json:"frame"`
 	Timestamp string            `json:"timestamp"`
 	Source    string            `json:"source"`
 	Dest      string            `json:"dest"`
@@ -47,7 +49,7 @@ type PacketData struct {
 
 func StartCapture(host, username, password string, interfaces []string, bpfFilter, wiresharkFilter string) (string, error) {
 	sessionID := fmt.Sprintf("session_%d", time.Now().UnixNano())
-	
+
 	// 如果没有选择网卡，macOS 使用 lo0，Linux 使用 any
 	if len(interfaces) == 0 {
 		// 先检测系统类型
@@ -56,12 +58,12 @@ func StartCapture(host, username, password string, interfaces []string, bpfFilte
 			log.Printf("Failed to detect remote OS, using default: %v", err)
 			interfaces = []string{"any"} // Linux 默认
 		} else if osType == "darwin" {
-			interfaces = []string{"en0"} // macOS 默认使用 en0（通常是 WiFi 或以太网）
+			interfaces = []string{"any"} // macOS 默认使用 en0（通常是 WiFi 或以太网）
 		} else {
 			interfaces = []string{"any"}
 		}
 	}
-	
+
 	// 构建 tcpdump 命令
 	var ifaceArgs string
 	if len(interfaces) == 1 {
@@ -70,18 +72,18 @@ func StartCapture(host, username, password string, interfaces []string, bpfFilte
 		// 多个网卡需要多个 -i 参数（tcpdump 可能不支持，这里简化处理）
 		ifaceArgs = fmt.Sprintf("-i %s", strings.Join(interfaces, " -i "))
 	}
-	
+
 	bpfArg := ""
 	if bpfFilter != "" {
 		bpfArg = fmt.Sprintf("'%s'", bpfFilter)
 	}
-	
+
 	// 检测远程系统类型以优化命令
 	osType, _ := detectRemoteOS(host, username, password)
-	
+
 	// 尝试配置 sudo 权限（如果失败也不影响，继续执行）
-	configureSudoPermissions(host, username, password, osType)
-	
+	//configureSudoPermissions(host, username, password, osType)
+
 	var command string
 	if osType == "darwin" {
 		// macOS 的 tcpdump 可能需要不同的参数
@@ -97,18 +99,22 @@ func StartCapture(host, username, password string, interfaces []string, bpfFilte
 			password, username, host, ifaceArgs, bpfArg,
 		)
 	}
-	
+
 	cmd := exec.Command("bash", "-c", command)
-	
+	// 设置进程组，以便后续可以一起终止所有子进程
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
+
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return "", fmt.Errorf("failed to create stdout pipe: %v", err)
 	}
-	
+
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("failed to start capture: %v", err)
 	}
-	
+
 	session := &CaptureSession{
 		SessionID:       sessionID,
 		Host:            host,
@@ -121,14 +127,14 @@ func StartCapture(host, username, password string, interfaces []string, bpfFilte
 		Stdout:          stdout,
 		IsActive:        true,
 	}
-	
+
 	sessionsLock.Lock()
 	sessions[sessionID] = session
 	sessionsLock.Unlock()
-	
+
 	// 启动 goroutine 读取并解析数据包
 	go readAndParsePackets(session, wiresharkFilter)
-	
+
 	return sessionID, nil
 }
 
@@ -137,16 +143,16 @@ func detectRemoteOS(host, username, password string) (string, error) {
 	cmd := exec.Command("sshpass", "-p", password, "ssh", "-o", "StrictHostKeyChecking=no",
 		fmt.Sprintf("%s@%s", username, host),
 		"uname -s")
-	
+
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	
+
 	err := cmd.Run()
 	if err != nil {
 		return "", fmt.Errorf("failed to detect OS: %v, stderr: %s", err, stderr.String())
 	}
-	
+
 	osName := strings.TrimSpace(stdout.String())
 	switch osName {
 	case "Darwin":
@@ -161,27 +167,27 @@ func detectRemoteOS(host, username, password string) (string, error) {
 // configureSudoPermissions 尝试配置远程主机的 sudo 权限
 func configureSudoPermissions(host, username, password, osType string) {
 	log.Printf("Attempting to configure sudo permissions for %s@%s", username, host)
-	
+
 	// 方法1: 尝试使用 visudo 添加 NOPASSWD 配置（需要已经有 sudo 权限）
 	visudoCmd := fmt.Sprintf(
 		"echo '%s ALL=(ALL) NOPASSWD: /usr/sbin/tcpdump' | sudo tee -a /etc/sudoers.d/tcpdump && sudo chmod 440 /etc/sudoers.d/tcpdump",
 		username,
 	)
-	
+
 	cmd := exec.Command("sshpass", "-p", password, "ssh", "-o", "StrictHostKeyChecking=no",
 		fmt.Sprintf("%s@%s", username, host),
 		visudoCmd)
-	
+
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	
+
 	err := cmd.Run()
 	if err == nil {
 		log.Printf("Successfully configured sudo NOPASSWD for tcpdump")
 		return
 	}
-	
+
 	log.Printf("Failed to configure sudo via visudo: %v, stderr: %s", err, stderr.String())
 	log.Printf("Note: You may need to manually configure sudo on the remote host")
 	log.Printf("See TSHARK_JSON_FIX.md for instructions")
@@ -190,19 +196,50 @@ func configureSudoPermissions(host, username, password, osType string) {
 func StopCapture(sessionID string) error {
 	sessionsLock.Lock()
 	defer sessionsLock.Unlock()
-	
+
 	session, exists := sessions[sessionID]
 	if !exists {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
-	
+
 	if session.Cmd != nil && session.IsActive {
-		if err := session.Cmd.Process.Kill(); err != nil {
-			log.Printf("Failed to kill capture process: %v", err)
+		// 使用进程组来终止所有子进程
+		// 发送 SIGTERM 信号给整个进程组
+		if session.Cmd.Process != nil {
+			// 首先尝试优雅地终止
+			pgid, err := syscall.Getpgid(session.Cmd.Process.Pid)
+			if err == nil {
+				// 杀死整个进程组
+				syscall.Kill(-pgid, syscall.SIGTERM)
+				log.Printf("Sent SIGTERM to process group %d", pgid)
+			} else {
+				// 如果获取进程组失败，只杀死主进程
+				log.Printf("Failed to get process group, killing main process only: %v", err)
+				session.Cmd.Process.Signal(syscall.SIGTERM)
+			}
+
+			// 等待一小段时间让进程退出
+			done := make(chan error, 1)
+			go func() {
+				done <- session.Cmd.Wait()
+			}()
+
+			// 超时后强制杀死
+			select {
+			case <-done:
+				log.Printf("Process exited cleanly")
+			case <-time.After(3 * time.Second):
+				log.Printf("Process did not exit, sending SIGKILL")
+				if pgid, err := syscall.Getpgid(session.Cmd.Process.Pid); err == nil {
+					syscall.Kill(-pgid, syscall.SIGKILL)
+				} else {
+					session.Cmd.Process.Kill()
+				}
+			}
 		}
 		session.IsActive = false
 	}
-	
+
 	delete(sessions, sessionID)
 	return nil
 }
@@ -226,10 +263,10 @@ func readAndParsePackets(session *CaptureSession, wiresharkFilter string) {
 			session.Stdout.Close()
 		}
 	}()
-	
+
 	// tshark -T json 输出的是一个 JSON 数组，需要流式解析
 	decoder := json.NewDecoder(session.Stdout)
-	
+
 	// 读取开始的 [
 	token, err := decoder.Token()
 	if err != nil {
@@ -240,7 +277,7 @@ func readAndParsePackets(session *CaptureSession, wiresharkFilter string) {
 		log.Printf("Expected JSON array start '[', got: %v", token)
 		return
 	}
-	
+
 	// 逐个读取数组中的对象
 	for decoder.More() {
 		var rawPacket json.RawMessage
@@ -248,34 +285,36 @@ func readAndParsePackets(session *CaptureSession, wiresharkFilter string) {
 			log.Printf("Failed to decode packet: %v", err)
 			continue
 		}
-		
+
 		// 解析数据包字段
 		var packet PacketData
 		if err := parseTsharkJSON(rawPacket, &packet); err != nil {
 			log.Printf("Failed to parse tshark JSON: %v", err)
 			continue
 		}
-		
+
 		// 应用 Wireshark 过滤器（简化版本，实际应该在 tshark 命令中应用）
 		if wiresharkFilter != "" && !applyWiresharkFilter(packet, wiresharkFilter) {
 			continue
 		}
-		
-		// 设置时间戳
-		packet.Timestamp = time.Now().Format("2006-01-02 15:04:05.000000")
-		
+
+		// 设置时间戳（如果从 tshark 获取的时间戳为空）
+		if packet.Timestamp == "" {
+			packet.Timestamp = time.Now().Format("2006-01-02 15:04:05.000000")
+		}
+
 		// 序列化并发送
 		packetJSON, err := json.Marshal(packet)
 		if err != nil {
 			log.Printf("Failed to marshal packet: %v", err)
 			continue
 		}
-		
+
 		// 通过 WebSocket 推送
 		clientLock.RLock()
 		conn, exists := clientMap[session.SessionID]
 		clientLock.RUnlock()
-		
+
 		if exists && conn != nil {
 			err := conn.WriteMessage(websocket.TextMessage, packetJSON)
 			if err != nil {
@@ -284,7 +323,7 @@ func readAndParsePackets(session *CaptureSession, wiresharkFilter string) {
 			}
 		}
 	}
-	
+
 	if err := decoder.InputOffset(); err != 0 {
 		// 检查是否有错误
 		log.Printf("Decoder finished")
@@ -307,32 +346,46 @@ func parseTsharkJSON(rawPacket json.RawMessage, packet *PacketData) error {
 	//     }
 	//   }
 	// }
-	
+
 	var tsharkPacket struct {
 		Source struct {
 			Layers map[string]json.RawMessage `json:"layers"`
 		} `json:"_source"`
 	}
-	
+
 	if err := json.Unmarshal(rawPacket, &tsharkPacket); err != nil {
 		return fmt.Errorf("invalid tshark packet format: %v", err)
 	}
-	
+
 	layers := tsharkPacket.Source.Layers
-	
+
 	// 提取基本信息
 	if frameData, ok := layers["frame"]; ok {
 		var frame map[string]interface{}
 		if err := json.Unmarshal(frameData, &frame); err == nil {
+			// 提取帧号
+			if frameNum, ok := frame["frame.number"]; ok {
+				switch v := frameNum.(type) {
+				case float64:
+					packet.Frame = int(v)
+				case string:
+					if num, err := fmt.Sscanf(v, "%d", &packet.Frame); err != nil || num != 1 {
+						// 如果解析失败，保持为0
+						packet.Frame = 0
+					}
+				}
+			}
+			// 提取时间戳
 			if ts, ok := frame["frame.time_epoch"].(string); ok {
 				packet.Timestamp = ts
 			}
+			// 提取长度
 			if length, ok := frame["frame.len"].(float64); ok {
 				packet.Length = int(length)
 			}
 		}
 	}
-	
+
 	// 提取协议信息
 	if ipData, ok := layers["ip"]; ok {
 		var ip map[string]interface{}
@@ -340,11 +393,11 @@ func parseTsharkJSON(rawPacket json.RawMessage, packet *PacketData) error {
 			src, srcOk := ip["ip.src"].(string)
 			dst, dstOk := ip["ip.dst"].(string)
 			proto, _ := ip["ip.proto"].(string)
-			
+
 			if srcOk && dstOk {
 				packet.Source = src
 				packet.Dest = dst
-				
+
 				// 确定协议名称
 				switch proto {
 				case "6":
@@ -371,12 +424,12 @@ func parseTsharkJSON(rawPacket json.RawMessage, packet *PacketData) error {
 			}
 		}
 	}
-	
+
 	// 如果还没有设置协议，设置为 UNKNOWN
 	if packet.Protocol == "" {
 		packet.Protocol = "UNKNOWN"
 	}
-	
+
 	return nil
 }
 
@@ -385,7 +438,7 @@ func applyWiresharkFilter(packet PacketData, filter string) bool {
 	// 这是一个简化版本，实际应该使用 tshark 的显示过滤器
 	// 这里只做基本的字符串匹配
 	filterLower := strings.ToLower(filter)
-	
+
 	if strings.Contains(filterLower, "ip.addr") {
 		// 提取 IP 地址进行匹配
 		parts := strings.Split(filterLower, "==")
@@ -397,7 +450,7 @@ func applyWiresharkFilter(packet PacketData, filter string) bool {
 			return false
 		}
 	}
-	
+
 	if strings.Contains(filterLower, "tcp.port") {
 		parts := strings.Split(filterLower, "==")
 		if len(parts) == 2 {
@@ -408,11 +461,11 @@ func applyWiresharkFilter(packet PacketData, filter string) bool {
 			return false
 		}
 	}
-	
+
 	// 协议过滤
 	if strings.Contains(filterLower, packet.Protocol) {
 		return true
 	}
-	
+
 	return true // 默认不过滤
 }
