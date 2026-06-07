@@ -1,7 +1,7 @@
 import type { Ref } from 'vue';
 import type { ApiResponse } from '../types';
 
-const API_BASE = '/api';
+const API_BASE = '/api/v1/webshark';
 
 export class ApiService {
   /**

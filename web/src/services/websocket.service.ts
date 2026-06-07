@@ -12,7 +12,7 @@ export class WebSocketService {
    */
   connect(sessionId: string): void {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/capture?session_id=${sessionId}`;
+    const wsUrl = `${protocol}//${window.location.host}/websocket/v1/webshark/event/${sessionId}`;
 
     this.ws = new WebSocket(wsUrl);
 

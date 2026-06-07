@@ -11,8 +11,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 type CaptureSession struct {
@@ -31,8 +29,6 @@ type CaptureSession struct {
 var (
 	sessions     = make(map[string]*CaptureSession)
 	sessionsLock sync.RWMutex
-	clientMap    = make(map[string]*websocket.Conn)
-	clientLock   sync.RWMutex
 )
 
 // PacketData 表示一个捕获的数据包
@@ -244,18 +240,6 @@ func StopCapture(sessionID string) error {
 	return nil
 }
 
-func RegisterClient(sessionID string, conn *websocket.Conn) {
-	clientLock.Lock()
-	defer clientLock.Unlock()
-	clientMap[sessionID] = conn
-}
-
-func UnregisterClient(sessionID string) {
-	clientLock.Lock()
-	defer clientLock.Unlock()
-	delete(clientMap, sessionID)
-}
-
 func readAndParsePackets(session *CaptureSession, wiresharkFilter string) {
 	defer func() {
 		session.IsActive = false
@@ -303,24 +287,10 @@ func readAndParsePackets(session *CaptureSession, wiresharkFilter string) {
 			packet.Timestamp = time.Now().Format("2006-01-02 15:04:05.000000")
 		}
 
-		// 序列化并发送
-		packetJSON, err := json.Marshal(packet)
-		if err != nil {
-			log.Printf("Failed to marshal packet: %v", err)
-			continue
-		}
-
-		// 通过 WebSocket 推送
-		clientLock.RLock()
-		conn, exists := clientMap[session.SessionID]
-		clientLock.RUnlock()
-
-		if exists && conn != nil {
-			err := conn.WriteMessage(websocket.TextMessage, packetJSON)
-			if err != nil {
-				log.Printf("WebSocket write error: %v", err)
-				conn.Close()
-			}
+		// 通过 PacketBroadcaster 发送到 WebSocket 客户端
+		broadcaster := GetPacketBroadcaster()
+		if err := broadcaster.SendPacketToSession(session.SessionID, packet); err != nil {
+			log.Printf("Failed to send packet to session %s: %v", session.SessionID, err)
 		}
 	}
 

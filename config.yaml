@@ -1,0 +1,57 @@
+# 项目配置文件
+
+# Nacos 配置
+tnacos:
+  # Nacos 服务器地址
+  server_addr: "192.168.72.146"
+  # Nacos 服务器端口
+  server_port: 8848
+  # 命名空间 ID
+  namespace: "1cf91be1-d0e3-4494-aef7-b3cb8177e04e"
+
+# 应用配置
+app:
+  # 应用名称
+  name: "WebShark"
+  # API 版本
+  version: "v1"
+
+# WebSocket 服务端配置
+server:
+  # 服务端监听地址
+  host: "0.0.0.0"
+  # 服务端监听端口（WebSocket 和 Web 服务共用）
+  port: 38081
+  # 服务端 WebSocket URL 路径
+  url: "/websocket/v1/webshark/event"
+
+# 日志配置
+log:
+  level: "debug"                    # 可选：debug, info, warn, error
+  format: "console"                 # 可选：json, console
+  output_paths:                     # 多个输出路径（同时输出到多个地方）
+    - "stdout"
+    - "logs/webshark.log"
+  # 日志切割配置
+  rotate:
+    filename: "logs/webshark.log"   # 日志文件路径
+    max_size: 10                    # 单个文件最大大小 (MB)
+    max_backups: 5                  # 保留的旧日志文件数量
+    max_age: 30                     # 日志文件保留天数
+    compress: false                 # 是否压缩旧日志
+
+# 数据库配置（用于存储地面站接入数据）
+database:
+  host: "localhost"
+  port: 3306
+  user: "root"
+  password: "123456"
+  dbname: "webshark"
+  max_idle_conns: 10
+  max_open_conns: 100
+  conn_max_lifetime: 3600           # 秒
+
+# 输出控制配置
+output:
+  # 是否输出 SQL 日志
+  enable_sql_log: false

@@ -18,7 +18,7 @@ npm install
 ### Development
 
 ```bash
-# Start development server
+# Start development web
 npm run dev
 ```
 
