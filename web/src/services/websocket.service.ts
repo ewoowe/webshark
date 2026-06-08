@@ -1,4 +1,4 @@
-import type { Packet } from '../types';
+import type { Packet } from '@/types';
 
 export class WebSocketService {
   private ws: WebSocket | null = null;

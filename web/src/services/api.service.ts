@@ -1,5 +1,5 @@
 import type { Ref } from 'vue';
-import type { ApiResponse } from '../types';
+import type { ApiResponse } from '@/types';
 
 const API_BASE = '/api/v1/webshark';
 

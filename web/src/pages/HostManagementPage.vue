@@ -262,8 +262,8 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue';
 import type { VxeGridInstance, VxeGridPropTypes } from 'vxe-table';
-import { HostService } from '../services/host.service';
-import type { Host, CreateHostRequest, UpdateHostRequest } from '../types';
+import { HostService } from '@/services/host.service';
+import type { Host, CreateHostRequest, UpdateHostRequest } from '@/types';
 
 // 状态管理
 const hosts = ref<Host[]>([]);

@@ -162,10 +162,10 @@
 <script setup lang="ts">
 import { ref, reactive, computed, nextTick } from 'vue';
 import { inject } from 'vue';
-import type { Packet, NetworkInterface } from '../types';
+import type { Packet, NetworkInterface } from '@/types';
 import type { VxeGridInstance, VxeGridProps } from 'vxe-table';
-import { ApiService } from '../services/api.service';
-import { WebSocketService } from '../services/websocket.service';
+import { ApiService } from '@/services/api.service';
+import { WebSocketService } from '@/services/websocket.service';
 
 // 注入父组件的上下文
 const appContext = inject('appContext') as any;

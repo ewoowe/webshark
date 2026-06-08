@@ -32,7 +32,7 @@
 
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue';
-import type { NetworkInterface } from '../types';
+import type { NetworkInterface } from '@/types';
 
 interface Props {
   visible: boolean;

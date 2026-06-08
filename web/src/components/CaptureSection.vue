@@ -46,7 +46,7 @@
 
 <script setup lang="ts">
 import { ref, computed, nextTick, reactive, onUnmounted } from 'vue';
-import type { Packet } from '../types';
+import type { Packet } from '@/types';
 import type { VxeGridInstance, VxeGridPropTypes, VxeColumnSlotTypes } from 'vxe-table';
 
 interface Props {

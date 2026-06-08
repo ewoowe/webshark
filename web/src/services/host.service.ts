@@ -5,7 +5,7 @@ import type {
   HostListResponse,
   UnifiedApiResponse,
   PaginationParams,
-} from '../types';
+} from '@/types';
 
 const API_BASE = '/api/v1/webshark';
 const HOSTS_BASE = `${API_BASE}/hosts`;
