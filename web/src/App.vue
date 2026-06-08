@@ -121,7 +121,7 @@ defineExpose({
 
 /* 侧边栏样式 */
 .sidebar {
-  width: 260px;
+  width: 200px;
   background: linear-gradient(180deg, #0f1a2e 0%, #141e30 30%, #1a2840 100%);
   color: white;
   display: flex;

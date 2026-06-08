@@ -51,6 +51,9 @@ func (s *Server) SetupAPIRoutes() {
 			// 删除主机
 			hosts.DELETE("/:id", web.DeleteHost)
 		}
+
+		// Task 管理路由组
+
 	}
 
 	// WebSocket 路由（带 clientID）

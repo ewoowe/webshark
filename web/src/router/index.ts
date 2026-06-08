@@ -19,6 +19,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '主机管理', icon: '🖥️' },
   },
   {
+    path: '/tasks',
+    name: 'tasks',
+    component: () => import('@/pages/TaskManagementPage.vue'),
+    meta: { title: '任务管理', icon: '📋' },
+  },
+  {
     path: '/capture',
     name: 'capture',
     component: () => import('@/pages/CapturePage.vue'),

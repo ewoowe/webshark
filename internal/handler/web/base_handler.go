@@ -95,6 +95,11 @@ func (h *BaseHandler[T]) ParsePageParams(c *gin.Context) (page, pageSize int) {
 	return page, pageSize
 }
 
+// ParseStringToInt64 将字符串转换为 int64
+func (h *BaseHandler[T]) ParseStringToInt64(s string) (int64, error) {
+	return strconv.ParseInt(s, 10, 64)
+}
+
 // CheckService 检查服务是否初始化
 func (h *BaseHandler[T]) CheckService(c *gin.Context) bool {
 	// 通过反射或其他方式检查，这里简化处理

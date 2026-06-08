@@ -86,10 +86,21 @@ func (pb *PacketBroadcaster) SendPacketToSession(sessionID string, packet interf
 		return err
 	}
 
-	eventBytes, _ := json.Marshal(event)
+	eventBytes, err := json.Marshal(event)
+	if err != nil {
+		logger.Error("序列化事件失败", zap.Error(err))
+		return err
+	}
+
+	// 使用 zstd 压缩数据
+	compressedBytes, err := utils.CompressZstd(eventBytes)
+	if err != nil {
+		logger.Error("压缩数据失败", zap.Error(err))
+		return err
+	}
 
 	// 发送到指定客户端
-	err = wsServer.SendToClient(clientID, eventBytes)
+	err = wsServer.SendToClient(clientID, compressedBytes)
 	if err != nil {
 		logger.Error("发送数据包到客户端失败",
 			zap.String("clientID", clientID),

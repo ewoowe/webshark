@@ -40,15 +40,21 @@ func GetInterfaces(c *gin.Context) {
 	})
 }
 
-// HostHandler 方法Wrapper
-
-// 全局变量和初始化函数（保持向后兼容）
+// 全局变量和初始化函数
 var globalHostHandler *HostHandler
+var globalTaskHandler *TaskHandler
 
-// InitHostService 初始化全局 HostService（保持向后兼容）
-func InitHostService(svc *service.HostService) {
+// InitHostHandler 初始化全局 HostHandler
+func InitHostHandler(svc *service.HostService) {
 	globalHostHandler = NewHostHandler(svc)
 }
+
+// InitTaskHandler 初始化全局 TaskHandler
+func InitTaskHandler(svc *service.TaskService) {
+	globalTaskHandler = NewTaskHandler(svc)
+}
+
+// HostHandler 方法Wrapper
 
 func CreateHost(c *gin.Context) {
 	if !CheckHandler(c, globalHostHandler) {

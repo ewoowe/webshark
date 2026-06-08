@@ -5,6 +5,7 @@ go 1.26
 require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/gorilla/websocket v1.5.1
+	github.com/klauspost/compress v1.17.6
 	github.com/nacos-group/nacos-sdk-go/v2 v2.3.5
 	github.com/spf13/viper v1.21.0
 	go.uber.org/zap v1.28.0

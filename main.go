@@ -154,7 +154,8 @@ func (a *App) initEventAndDb() error {
 			return err
 		}
 
-		webhandler.InitHostService(service.NewHostService(repo))
+		webhandler.InitHostHandler(service.NewHostService(repo))
+		webhandler.InitTaskHandler(service.NewTaskService(repo))
 
 		logger.Info("数据服务已初始化",
 			zap.String("host", a.conf.Database.Host),

@@ -1,7 +1,6 @@
 package gorm
 
 import (
-	"errors"
 	"fmt"
 	"time"
 	"webshark/internal/config"
@@ -17,6 +16,12 @@ import (
 type WebSharkRepository struct {
 	db     *gorm.DB
 	config *config.DBConfig
+	// 预创建的泛型 repository 实例，避免重复创建
+	hostRepo      *BaseRepository[Host]
+	taskRepo      *BaseRepository[Task]
+	taskGroupRepo *BaseRepository[TaskGroup]
+	packetRepo    *BaseRepository[Packet]
+	processRepo   *BaseRepository[Process]
 }
 
 // NewWebSharkRepository 创建WebShark数据仓库
@@ -72,6 +77,12 @@ func NewWebSharkRepository(dbConfig *config.DBConfig) (*WebSharkRepository, erro
 	repo := &WebSharkRepository{
 		db:     db,
 		config: dbConfig,
+		// 预创建所有 repository 实例
+		hostRepo:      NewBaseRepository[Host](db),
+		taskRepo:      NewBaseRepository[Task](db),
+		taskGroupRepo: NewBaseRepository[TaskGroup](db),
+		packetRepo:    NewBaseRepository[Packet](db),
+		processRepo:   NewBaseRepository[Process](db),
 	}
 
 	// 自动迁移表结构
@@ -85,9 +96,9 @@ func NewWebSharkRepository(dbConfig *config.DBConfig) (*WebSharkRepository, erro
 
 // autoMigrate 自动迁移表结构
 func (r *WebSharkRepository) autoMigrate() error {
-	return r.db.AutoMigrate(
-		&Host{},
-	)
+	// 使用 GetAllModels() 自动获取所有模型，无需手动维护
+	models := GetAllModels()
+	return r.db.AutoMigrate(models...)
 }
 
 // Close 关闭数据库连接
@@ -103,125 +114,249 @@ func (r *WebSharkRepository) Close() error {
 
 // CreateHost 创建主机记录
 func (r *WebSharkRepository) CreateHost(host *Host) error {
-	return r.db.Create(host).Error
+	return r.hostRepo.Create(host)
 }
 
 // GetHostByID 根据 ID 获取主机
 func (r *WebSharkRepository) GetHostByID(id int64) (*Host, error) {
-	var host Host
-	err := r.db.First(&host, id).Error
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, fmt.Errorf("host not found: %d", id)
-		}
-		return nil, err
-	}
-	return &host, nil
+	return r.hostRepo.GetByID(id)
 }
 
-// GetHostByIP 根据 IP 获取主机
+// GetHostByIP 根据 IP 获取主机（特殊查询）
 func (r *WebSharkRepository) GetHostByIP(ip string) (*Host, error) {
-	var host Host
-	err := r.db.Where("ip = ?", ip).First(&host).Error
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, fmt.Errorf("host not found with IP: %s", ip)
-		}
-		return nil, err
-	}
-	return &host, nil
+	return r.hostRepo.FirstByCondition("ip = ?", ip)
 }
 
 // ListHosts 获取主机列表（支持分页）
 func (r *WebSharkRepository) ListHosts(page, pageSize int) ([]*Host, int64, error) {
-	var hosts []*Host
-	var total int64
-
-	// 计算总数
-	if err := r.db.Model(&Host{}).Count(&total).Error; err != nil {
-		return nil, 0, err
-	}
-
-	// 分页查询
-	offset := (page - 1) * pageSize
-	if page <= 0 {
-		offset = 0
-	}
-	if pageSize <= 0 {
-		pageSize = 10 // 默认每页 10 条
-	}
-
-	err := r.db.Offset(offset).Limit(pageSize).Order("created_at DESC").Find(&hosts).Error
-	if err != nil {
-		return nil, 0, err
-	}
-
-	return hosts, total, nil
+	return r.hostRepo.List(page, pageSize, "created_at DESC")
 }
 
 // SearchHosts 搜索主机（根据 hostname 或 IP）
 func (r *WebSharkRepository) SearchHosts(keyword string, page, pageSize int) ([]*Host, int64, error) {
-	var hosts []*Host
-	var total int64
-
-	// 构建查询条件
-	query := r.db.Where("host_name LIKE ? OR ip LIKE ?", "%"+keyword+"%", "%"+keyword+"%")
-
-	// 计算总数
-	if err := query.Model(&Host{}).Count(&total).Error; err != nil {
-		return nil, 0, err
-	}
-
-	// 分页查询
-	offset := (page - 1) * pageSize
-	if page <= 0 {
-		offset = 0
-	}
-	if pageSize <= 0 {
-		pageSize = 10
-	}
-
-	err := query.Offset(offset).Limit(pageSize).Order("created_at DESC").Find(&hosts).Error
-	if err != nil {
-		return nil, 0, err
-	}
-
-	return hosts, total, nil
+	query := "host_name LIKE ? OR ip LIKE ?"
+	args := []interface{}{"%" + keyword + "%", "%" + keyword + "%"}
+	return r.hostRepo.ListByCondition(query, args, page, pageSize, "created_at DESC")
 }
 
 // UpdateHost 更新主机信息
 func (r *WebSharkRepository) UpdateHost(host *Host) error {
-	return r.db.Save(host).Error
+	return r.hostRepo.Update(host)
 }
 
 // UpdateHostPassword 更新主机密码
 func (r *WebSharkRepository) UpdateHostPassword(id int64, newPassword string) error {
-	return r.db.Model(&Host{}).Where("id = ?", id).Update("password", newPassword).Error
+	return r.hostRepo.UpdateField(id, "password", newPassword)
 }
 
 // DeleteHost 删除主机（物理删除）
 func (r *WebSharkRepository) DeleteHost(id int64) error {
-	return r.db.Delete(&Host{}, id).Error
+	return r.hostRepo.Delete(id)
 }
 
 // DeleteHostByIP 根据 IP 删除主机
 func (r *WebSharkRepository) DeleteHostByIP(ip string) error {
-	return r.db.Where("ip = ?", ip).Delete(&Host{}).Error
+	return r.hostRepo.DeleteByCondition("ip = ?", ip)
 }
 
 // HostExists 检查主机是否存在
 func (r *WebSharkRepository) HostExists(id int64) (bool, error) {
-	var count int64
-	err := r.db.Model(&Host{}).Where("id = ?", id).Count(&count).Error
-	if err != nil {
-		return false, err
-	}
-	return count > 0, nil
+	return r.hostRepo.Exists(id)
 }
 
 // GetHostCount 获取主机总数
 func (r *WebSharkRepository) GetHostCount() (int64, error) {
-	var count int64
-	err := r.db.Model(&Host{}).Count(&count).Error
-	return count, err
+	return r.hostRepo.Count()
+}
+
+// ==================== Task 增删改查 ====================
+
+// CreateTask 创建任务记录
+func (r *WebSharkRepository) CreateTask(task *Task) error {
+	return r.taskRepo.Create(task)
+}
+
+// GetTaskByID 根据 ID 获取任务
+func (r *WebSharkRepository) GetTaskByID(id int64) (*Task, error) {
+	return r.taskRepo.GetByID(id)
+}
+
+// ListTasks 获取任务列表（支持分页）
+func (r *WebSharkRepository) ListTasks(page, pageSize int) ([]*Task, int64, error) {
+	return r.taskRepo.List(page, pageSize, "created_at DESC")
+}
+
+// ListTasksByHostID 根据主机 ID 获取任务列表
+func (r *WebSharkRepository) ListTasksByHostID(hostID int64, page, pageSize int) ([]*Task, int64, error) {
+	return r.taskRepo.ListByCondition("host_id = ?", []interface{}{hostID}, page, pageSize, "created_at DESC")
+}
+
+// ListTasksByTaskGroupID 根据任务组 ID 获取任务列表
+func (r *WebSharkRepository) ListTasksByTaskGroupID(taskGroupID int64, page, pageSize int) ([]*Task, int64, error) {
+	return r.taskRepo.ListByCondition("task_group_id = ?", []interface{}{taskGroupID}, page, pageSize, "created_at DESC")
+}
+
+// UpdateTask 更新任务信息
+func (r *WebSharkRepository) UpdateTask(task *Task) error {
+	return r.taskRepo.Update(task)
+}
+
+// UpdateTaskStopTime 更新任务停止时间
+func (r *WebSharkRepository) UpdateTaskStopTime(id int64, stopAt time.Time) error {
+	return r.taskRepo.UpdateField(id, "stop_at", stopAt)
+}
+
+// DeleteTask 删除任务
+func (r *WebSharkRepository) DeleteTask(id int64) error {
+	return r.taskRepo.Delete(id)
+}
+
+// TaskExists 检查任务是否存在
+func (r *WebSharkRepository) TaskExists(id int64) (bool, error) {
+	return r.taskRepo.Exists(id)
+}
+
+// GetTaskCount 获取任务总数
+func (r *WebSharkRepository) GetTaskCount() (int64, error) {
+	return r.taskRepo.Count()
+}
+
+// ==================== TaskGroup 增删改查 ====================
+
+// CreateTaskGroup 创建任务组
+func (r *WebSharkRepository) CreateTaskGroup(taskGroup *TaskGroup) error {
+	return r.taskGroupRepo.Create(taskGroup)
+}
+
+// GetTaskGroupByID 根据 ID 获取任务组
+func (r *WebSharkRepository) GetTaskGroupByID(id int64) (*TaskGroup, error) {
+	return r.taskGroupRepo.GetByID(id)
+}
+
+// ListTaskGroups 获取任务组列表（支持分页）
+func (r *WebSharkRepository) ListTaskGroups(page, pageSize int) ([]*TaskGroup, int64, error) {
+	return r.taskGroupRepo.List(page, pageSize, "created_at DESC")
+}
+
+// UpdateTaskGroup 更新任务组信息
+func (r *WebSharkRepository) UpdateTaskGroup(taskGroup *TaskGroup) error {
+	return r.taskGroupRepo.Update(taskGroup)
+}
+
+// UpdateTaskGroupStopTime 更新任务组停止时间
+func (r *WebSharkRepository) UpdateTaskGroupStopTime(id int64, stopAt time.Time) error {
+	return r.taskGroupRepo.UpdateField(id, "stop_at", stopAt)
+}
+
+// DeleteTaskGroup 删除任务组
+func (r *WebSharkRepository) DeleteTaskGroup(id int64) error {
+	return r.taskGroupRepo.Delete(id)
+}
+
+// TaskGroupExists 检查任务组是否存在
+func (r *WebSharkRepository) TaskGroupExists(id int64) (bool, error) {
+	return r.taskGroupRepo.Exists(id)
+}
+
+// GetTaskGroupCount 获取任务组总数
+func (r *WebSharkRepository) GetTaskGroupCount() (int64, error) {
+	return r.taskGroupRepo.Count()
+}
+
+// ==================== Packet 增删改查 ====================
+
+// CreatePacket 创建数据包记录
+func (r *WebSharkRepository) CreatePacket(packet *Packet) error {
+	return r.packetRepo.Create(packet)
+}
+
+// BatchCreatePackets 批量创建数据包记录
+func (r *WebSharkRepository) BatchCreatePackets(packets []*Packet) error {
+	return r.packetRepo.BatchCreate(packets, 100)
+}
+
+// GetPacketByID 根据 ID 获取数据包
+func (r *WebSharkRepository) GetPacketByID(id int64) (*Packet, error) {
+	return r.packetRepo.GetByID(id)
+}
+
+// ListPacketsByTaskID 根据任务 ID 获取数据包列表（支持分页）
+func (r *WebSharkRepository) ListPacketsByTaskID(taskID int64, page, pageSize int) ([]*Packet, int64, error) {
+	return r.packetRepo.ListByCondition("task_id = ?", []interface{}{taskID}, page, pageSize, "frame_number ASC")
+}
+
+// ListPacketsByProtocol 根据协议类型获取数据包列表
+func (r *WebSharkRepository) ListPacketsByProtocol(taskID int64, protocol string, page, pageSize int) ([]*Packet, int64, error) {
+	query := "task_id = ? AND protocol = ?"
+	args := []interface{}{taskID, protocol}
+	return r.packetRepo.ListByCondition(query, args, page, pageSize, "frame_number ASC")
+}
+
+// SearchPackets 搜索数据包（根据源地址、目的地址或协议）
+func (r *WebSharkRepository) SearchPackets(taskID int64, keyword string, page, pageSize int) ([]*Packet, int64, error) {
+	query := "task_id = ? AND (src LIKE ? OR dst LIKE ? OR protocol LIKE ?)"
+	args := []interface{}{taskID, "%" + keyword + "%", "%" + keyword + "%", "%" + keyword + "%"}
+	return r.packetRepo.ListByCondition(query, args, page, pageSize, "frame_number ASC")
+}
+
+// DeletePacketsByTaskID 根据任务 ID 删除所有数据包
+func (r *WebSharkRepository) DeletePacketsByTaskID(taskID int64) error {
+	return r.packetRepo.DeleteByCondition("task_id = ?", taskID)
+}
+
+// GetPacketCountByTaskID 获取任务的数据包总数
+func (r *WebSharkRepository) GetPacketCountByTaskID(taskID int64) (int64, error) {
+	return r.packetRepo.CountByCondition("task_id = ?", taskID)
+}
+
+// ==================== Process 增删改查 ====================
+
+// CreateProcess 创建进程记录
+func (r *WebSharkRepository) CreateProcess(process *Process) error {
+	return r.processRepo.Create(process)
+}
+
+// BatchCreateProcesses 批量创建进程记录
+func (r *WebSharkRepository) BatchCreateProcesses(processes []*Process) error {
+	return r.processRepo.BatchCreate(processes, 50)
+}
+
+// GetProcessByID 根据 ID 获取进程
+func (r *WebSharkRepository) GetProcessByID(id int64) (*Process, error) {
+	return r.processRepo.GetByID(id)
+}
+
+// ListProcessesByTaskID 根据任务 ID 获取进程列表
+func (r *WebSharkRepository) ListProcessesByTaskID(taskID int64) ([]*Process, error) {
+	return r.processRepo.FindByCondition("task_id = ?", []interface{}{taskID}, "id ASC")
+}
+
+// GetProcessByPid 根据 PID 获取进程
+func (r *WebSharkRepository) GetProcessByPid(pid int64) (*Process, error) {
+	return r.processRepo.FirstByCondition("pid = ?", pid)
+}
+
+// UpdateProcess 更新进程信息
+func (r *WebSharkRepository) UpdateProcess(process *Process) error {
+	return r.processRepo.Update(process)
+}
+
+// DeleteProcess 删除进程记录
+func (r *WebSharkRepository) DeleteProcess(id int64) error {
+	return r.processRepo.Delete(id)
+}
+
+// DeleteProcessesByTaskID 根据任务 ID 删除所有进程记录
+func (r *WebSharkRepository) DeleteProcessesByTaskID(taskID int64) error {
+	return r.processRepo.DeleteByCondition("task_id = ?", taskID)
+}
+
+// ProcessExists 检查进程是否存在
+func (r *WebSharkRepository) ProcessExists(id int64) (bool, error) {
+	return r.processRepo.Exists(id)
+}
+
+// GetProcessCountByTaskID 获取任务的进程总数
+func (r *WebSharkRepository) GetProcessCountByTaskID(taskID int64) (int64, error) {
+	return r.processRepo.CountByCondition("task_id = ?", taskID)
 }
