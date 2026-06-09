@@ -6,39 +6,34 @@ import (
 	"webshark/internal/gorm"
 )
 
-// HostService Host 服务
-type HostService struct {
-	repo *gorm.WebSharkRepository
-}
-
-// NewHostService 创建 Host 服务实例
-func NewHostService(repo *gorm.WebSharkRepository) *HostService {
-	return &HostService{
-		repo: repo,
-	}
-}
-
 // CreateHostRequest 创建主机请求
 type CreateHostRequest struct {
-	HostName string `json:"hostName" binding:"required"`
-	IP       string `json:"ip" binding:"required"`
-	UserName string `json:"userName" binding:"required"`
-	Password string `json:"password" binding:"required"`
-	OS       string `json:"os"`
+	HostName string `json:"hostName" binding:"required" label:"主机名称"`
+	IP       string `json:"ip" binding:"required" label:"IP地址"`
+	UserName string `json:"userName" binding:"required" label:"用户名"`
+	Password string `json:"password" binding:"required" label:"密码"`
+	OS       string `json:"os" label:"操作系统"`
 }
 
 // UpdateHostRequest 更新主机请求
 type UpdateHostRequest struct {
-	ID       int64  `json:"id" binding:"required"`
-	IP       string `json:"ip"`
-	HostName string `json:"hostName"`
-	UserName string `json:"userName"`
-	Password string `json:"password"`
-	OS       string `json:"os"`
+	ID int64 `json:"id" binding:"required" label:"主机ID"`
+	CreateHostRequest
+}
+
+// ListHostsRequest 获取主机列表请求
+type ListHostsRequest struct {
+	entity.PageRequest
+}
+
+// SearchHostsRequest 搜索主机请求
+type SearchHostsRequest struct {
+	Keyword string `form:"keyword" json:"keyword"`
+	entity.PageRequest
 }
 
 // CreateHost 创建主机
-func (s *HostService) CreateHost(req *CreateHostRequest) (*gorm.Host, error) {
+func CreateHost(req *CreateHostRequest) (*gorm.Host, error) {
 	host := &gorm.Host{
 		HostName: req.HostName,
 		IP:       req.IP,
@@ -47,7 +42,7 @@ func (s *HostService) CreateHost(req *CreateHostRequest) (*gorm.Host, error) {
 		OS:       req.OS,
 	}
 
-	if err := s.repo.CreateHost(host); err != nil {
+	if err := gorm.Repo.CreateHost(host); err != nil {
 		return nil, fmt.Errorf("failed to create host: %w", err)
 	}
 
@@ -55,8 +50,8 @@ func (s *HostService) CreateHost(req *CreateHostRequest) (*gorm.Host, error) {
 }
 
 // GetHostByID 根据 ID 获取主机
-func (s *HostService) GetHostByID(id int64) (*gorm.Host, error) {
-	host, err := s.repo.GetHostByID(id)
+func GetHostByID(id int64) (*gorm.Host, error) {
+	host, err := gorm.Repo.GetHostByID(id)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get host: %w", err)
 	}
@@ -64,25 +59,12 @@ func (s *HostService) GetHostByID(id int64) (*gorm.Host, error) {
 	return host, nil
 }
 
-// ListHostsRequest 获取主机列表请求
-type ListHostsRequest struct {
-	Page     int `form:"page" json:"page"`
-	PageSize int `form:"pageSize" json:"pageSize"`
-}
-
 // ListHosts 获取主机列表
-func (s *HostService) ListHosts(req *ListHostsRequest) (*entity.PageResponse[*gorm.Host], error) {
+func ListHosts(req *ListHostsRequest) (*entity.PageResponse[*gorm.Host], error) {
 	page := req.Page
 	pageSize := req.PageSize
 
-	if page < 1 {
-		page = 1
-	}
-	if pageSize < 1 {
-		pageSize = 10
-	}
-
-	hosts, total, err := s.repo.ListHosts(page, pageSize)
+	hosts, total, err := gorm.Repo.ListHosts(page, pageSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list hosts: %w", err)
 	}
@@ -90,15 +72,8 @@ func (s *HostService) ListHosts(req *ListHostsRequest) (*entity.PageResponse[*go
 	return entity.NewPageResponse(hosts, total, page, pageSize), nil
 }
 
-// SearchHostsRequest 搜索主机请求
-type SearchHostsRequest struct {
-	Keyword  string `form:"keyword" json:"keyword"`
-	Page     int    `form:"page" json:"page"`
-	PageSize int    `form:"pageSize" json:"pageSize"`
-}
-
 // SearchHosts 搜索主机
-func (s *HostService) SearchHosts(req *SearchHostsRequest) (*entity.PageResponse[*gorm.Host], error) {
+func SearchHosts(req *SearchHostsRequest) (*entity.PageResponse[*gorm.Host], error) {
 	if req.Keyword == "" {
 		return nil, fmt.Errorf("keyword is required")
 	}
@@ -106,14 +81,7 @@ func (s *HostService) SearchHosts(req *SearchHostsRequest) (*entity.PageResponse
 	page := req.Page
 	pageSize := req.PageSize
 
-	if page < 1 {
-		page = 1
-	}
-	if pageSize < 1 {
-		pageSize = 10
-	}
-
-	hosts, total, err := s.repo.SearchHosts(req.Keyword, page, pageSize)
+	hosts, total, err := gorm.Repo.SearchHosts(req.Keyword, page, pageSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search hosts: %w", err)
 	}
@@ -122,9 +90,9 @@ func (s *HostService) SearchHosts(req *SearchHostsRequest) (*entity.PageResponse
 }
 
 // UpdateHost 更新主机
-func (s *HostService) UpdateHost(req *UpdateHostRequest) (*gorm.Host, error) {
+func UpdateHost(req *UpdateHostRequest) (*gorm.Host, error) {
 	// 先获取现有记录
-	host, err := s.repo.GetHostByID(req.ID)
+	host, err := gorm.Repo.GetHostByID(req.ID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get host: %w", err)
 	}
@@ -146,7 +114,7 @@ func (s *HostService) UpdateHost(req *UpdateHostRequest) (*gorm.Host, error) {
 		host.OS = req.OS
 	}
 
-	if err := s.repo.UpdateHost(host); err != nil {
+	if err := gorm.Repo.UpdateHost(host); err != nil {
 		return nil, fmt.Errorf("failed to update host: %w", err)
 	}
 
@@ -154,8 +122,8 @@ func (s *HostService) UpdateHost(req *UpdateHostRequest) (*gorm.Host, error) {
 }
 
 // DeleteHost 删除主机
-func (s *HostService) DeleteHost(id int64) error {
-	if err := s.repo.DeleteHost(id); err != nil {
+func DeleteHost(id int64) error {
+	if err := gorm.Repo.DeleteHost(id); err != nil {
 		return fmt.Errorf("failed to delete host: %w", err)
 	}
 

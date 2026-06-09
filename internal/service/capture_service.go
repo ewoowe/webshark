@@ -13,6 +13,31 @@ import (
 	"time"
 )
 
+type CaptureRequest struct {
+	TaskName     string        `json:"taskName" binding:"required" label:"任务名称"`            // 任务名称
+	OnlyCapture  bool          `json:"onlyCapture"`                                         // 是否只捕获数据包，不解析
+	ParseDetail  bool          `json:"parseDetail"`                                         // 是否解析数据包详情
+	DetailFormat string        `json:"detailFormat"`                                        // 数据包详情格式
+	HostCaptures []HostCapture `json:"hostCaptures" binding:"required,dive" label:"主机抓包配置"` // 所有目标主机的抓包配置
+}
+
+type HostCapture struct {
+	HostID   string              `json:"hostId" binding:"required" label:"目标主机ID"`        // 目标主机ID
+	Captures []HostSingleCapture `json:"captures" binding:"required,dive" label:"抓包任务列表"` // 多组抓包任务的配置
+}
+
+type HostSingleCapture struct {
+	StreamID        string   `json:"streamId" binding:"required" label:"抓包流序号"` // 抓包流序号
+	Interfaces      []string `json:"interfaces"`                                // 本次抓包流所在的网卡
+	BPFFilter       string   `json:"bpfFilter"`                                 // BPF 过滤器
+	WiresharkFilter string   `json:"wiresharkFilter"`                           // Wireshark 过滤器
+}
+
+type TaskInfo struct {
+	TaskGroupID int64   `json:"taskGroupId"` // 任务组ID
+	TaskIDs     []int64 `json:"taskIds"`     // 任务ID列表
+}
+
 type CaptureSession struct {
 	SessionID       string
 	Host            string
@@ -43,7 +68,12 @@ type PacketData struct {
 	Details   map[string]string `json:"details,omitempty"`
 }
 
-func StartCapture(host, username, password string, interfaces []string, bpfFilter, wiresharkFilter string) (string, error) {
+func StartCapture(captureRequest CaptureRequest) (*TaskInfo, error) {
+
+	return nil, nil
+}
+
+func StartCaptureOld(host, username, password string, interfaces []string, bpfFilter, wiresharkFilter string) (string, error) {
 	sessionID := fmt.Sprintf("session_%d", time.Now().UnixNano())
 
 	// 如果没有选择网卡，macOS 使用 lo0，Linux 使用 any

@@ -11,9 +11,7 @@ import (
 	"webshark/internal/config"
 	"webshark/internal/gorm"
 	eventhandler "webshark/internal/handler/event"
-	webhandler "webshark/internal/handler/web"
 	"webshark/internal/logger"
-	"webshark/internal/service"
 	"webshark/internal/utils"
 	"webshark/internal/web"
 	"webshark/internal/websocket"
@@ -38,6 +36,7 @@ func init() {
 type App struct {
 	conf       *config.Config             // 全局配置文件
 	dispatcher *websocket.EventDispatcher // 事件分发器
+	repo       *gorm.WebSharkRepository   // 数据仓库
 	webServer  *web.Server                // Web 服务端
 	wsServer   *websocket.WebSocketServer // WebSocket 服务端
 	sigChan    chan os.Signal             // 信号通道
@@ -144,7 +143,7 @@ func (a *App) initEventAndDb() error {
 
 	// 初始化数据服务（从配置文件读取数据库配置）
 	if a.conf.Database != nil && a.conf.Database.Host != "" {
-		repo, err := gorm.NewWebSharkRepository(a.conf.Database)
+		repo, err := gorm.InitWebSharkRepository(a.conf.Database)
 		if err != nil {
 			logger.Error("创建数据仓库失败",
 				zap.String("host", a.conf.Database.Host),
@@ -153,9 +152,8 @@ func (a *App) initEventAndDb() error {
 				zap.Error(err))
 			return err
 		}
-
-		webhandler.InitHostHandler(service.NewHostService(repo))
-		webhandler.InitTaskHandler(service.NewTaskService(repo))
+		// 保存到 app 实例，以便后续关闭
+		a.repo = repo
 
 		logger.Info("数据服务已初始化",
 			zap.String("host", a.conf.Database.Host),
@@ -273,6 +271,14 @@ func (a *App) ShutDown(capSig os.Signal) {
 		defer cancel() // 确保一定会释放资源
 		if err := a.wsServer.Stop(ctx); err != nil {
 			logger.Error("关闭 WebSocket 服务端失败", zap.Error(err))
+		}
+	}
+
+	// 关闭数据仓库连接（如果已初始化）
+	if a.repo != nil {
+		logger.Info("正在关闭数据库连接...")
+		if err := a.repo.Close(); err != nil {
+			logger.Error("关闭数据库连接失败", zap.Error(err))
 		}
 	}
 

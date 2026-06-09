@@ -16,7 +16,7 @@ app:
   # API 版本
   version: "v1"
 
-# WebSocket 服务端配置
+# 服务端配置
 server:
   # 服务端监听地址
   host: "0.0.0.0"
@@ -40,7 +40,7 @@ log:
     max_age: 30                     # 日志文件保留天数
     compress: false                 # 是否压缩旧日志
 
-# 数据库配置（用于存储地面站接入数据）
+# 数据库配置
 database:
   host: "localhost"
   port: 3306

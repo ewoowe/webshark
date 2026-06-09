@@ -2,6 +2,7 @@ package gorm
 
 import (
 	"fmt"
+	"sync"
 	"time"
 	"webshark/internal/config"
 	"webshark/internal/logger"
@@ -10,6 +11,12 @@ import (
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
+)
+
+// Repo 全局Repo
+var (
+	Repo *WebSharkRepository
+	once sync.Once
 )
 
 // WebSharkRepository 接入数据仓库
@@ -24,8 +31,19 @@ type WebSharkRepository struct {
 	processRepo   *BaseRepository[Process]
 }
 
-// NewWebSharkRepository 创建WebShark数据仓库
-func NewWebSharkRepository(dbConfig *config.DBConfig) (*WebSharkRepository, error) {
+func InitWebSharkRepository(dbConfig *config.DBConfig) (*WebSharkRepository, error) {
+	var initErr error
+	once.Do(func() {
+		Repo, initErr = initWebSharkRepository(dbConfig)
+		if initErr != nil {
+			initErr = fmt.Errorf("failed to init WebSharkRepository: %w", initErr)
+		}
+	})
+	return Repo, initErr
+}
+
+// initWebSharkRepository 初始化WebShark数据仓库
+func initWebSharkRepository(dbConfig *config.DBConfig) (*WebSharkRepository, error) {
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local",
 		dbConfig.User,
 		dbConfig.Password,
@@ -90,6 +108,8 @@ func NewWebSharkRepository(dbConfig *config.DBConfig) (*WebSharkRepository, erro
 		logger.Error("failed to migrate database", zap.String("error", err.Error()))
 		return nil, fmt.Errorf("failed to migrate database: %w", err)
 	}
+
+	Repo = repo
 
 	return repo, nil
 }

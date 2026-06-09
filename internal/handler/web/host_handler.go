@@ -1,127 +1,120 @@
 package web
 
 import (
+	"webshark/internal/entity"
 	"webshark/internal/service"
 
 	"github.com/gin-gonic/gin"
 )
 
-// HostHandler Host 处理器
-type HostHandler struct {
-	*BaseHandler[*service.HostService]
-}
-
-// NewHostHandler 创建 Host 处理器
-func NewHostHandler(hostSvc *service.HostService) *HostHandler {
-	return &HostHandler{
-		BaseHandler: NewBaseHandler[*service.HostService](hostSvc),
-	}
-}
-
 // CreateHost 创建主机
-func (h *HostHandler) CreateHost(c *gin.Context) {
+func CreateHost(c *gin.Context) {
 	var req service.CreateHostRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		h.BadRequest(c, "Invalid request: "+err.Error())
+		ValidationErrorWithStruct(c, err, &req)
 		return
 	}
 
-	host, err := h.GetService().CreateHost(&req)
+	host, err := service.CreateHost(&req)
 	if err != nil {
-		h.InternalError(c, err)
+		InternalError(c, err)
 		return
 	}
 
-	h.SuccessWithMsg(c, host, "Host created successfully")
+	SuccessWithMsg(c, host, "主机创建成功")
 }
 
 // GetHost 获取单个主机
-func (h *HostHandler) GetHost(c *gin.Context) {
-	id, ok := h.ParseIntParam(c, "id")
+func GetHost(c *gin.Context) {
+	id, ok := ParseIntParam(c, "id")
 	if !ok {
 		return
 	}
 
-	host, err := h.GetService().GetHostByID(id)
+	host, err := service.GetHostByID(id)
 	if err != nil {
-		h.NotFound(c, err)
+		NotFound(c, err)
 		return
 	}
 
-	h.Success(c, host)
+	Success(c, host)
 }
 
 // ListHosts 获取主机列表
-func (h *HostHandler) ListHosts(c *gin.Context) {
-	page, pageSize := h.ParsePageParams(c)
+func ListHosts(c *gin.Context) {
+	page, pageSize := ParsePageParams(c)
 
 	req := &service.ListHostsRequest{
-		Page:     page,
-		PageSize: pageSize,
+		PageRequest: entity.PageRequest{
+			Page:     page,
+			PageSize: pageSize,
+		},
 	}
 
-	resp, err := h.GetService().ListHosts(req)
+	resp, err := service.ListHosts(req)
 	if err != nil {
-		h.InternalError(c, err)
+		InternalError(c, err)
 		return
 	}
 
-	h.Success(c, resp)
+	Success(c, resp)
 }
 
 // SearchHosts 搜索主机
-func (h *HostHandler) SearchHosts(c *gin.Context) {
+func SearchHosts(c *gin.Context) {
 	keyword := c.Query("keyword")
 	if keyword == "" {
-		h.BadRequest(c, "Missing search keyword")
+		BadRequest(c, "缺少搜索关键字")
 		return
 	}
 
-	page, pageSize := h.ParsePageParams(c)
+	page, pageSize := ParsePageParams(c)
 
 	req := &service.SearchHostsRequest{
-		Keyword:  keyword,
-		Page:     page,
-		PageSize: pageSize,
+		Keyword: keyword,
+		PageRequest: entity.PageRequest{
+			Page:     page,
+			PageSize: pageSize,
+		},
 	}
 
-	resp, err := h.GetService().SearchHosts(req)
+	resp, err := service.SearchHosts(req)
 	if err != nil {
-		h.InternalError(c, err)
+		InternalError(c, err)
 		return
 	}
 
-	h.Success(c, resp)
+	Success(c, resp)
 }
 
 // UpdateHost 更新主机
-func (h *HostHandler) UpdateHost(c *gin.Context) {
+func UpdateHost(c *gin.Context) {
 	var req service.UpdateHostRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		h.BadRequest(c, "Invalid request: "+err.Error())
+		ValidationErrorWithStruct(c, err, &req)
 		return
 	}
 
-	host, err := h.GetService().UpdateHost(&req)
+	host, err := service.UpdateHost(&req)
 	if err != nil {
-		h.InternalError(c, err)
+		InternalError(c, err)
 		return
 	}
 
-	h.SuccessWithMsg(c, host, "Host updated successfully")
+	SuccessWithMsg(c, host, "主机更新成功")
 }
 
 // DeleteHost 删除主机
-func (h *HostHandler) DeleteHost(c *gin.Context) {
-	id, ok := h.ParseIntParam(c, "id")
+func DeleteHost(c *gin.Context) {
+	id, ok := ParseIntParam(c, "id")
 	if !ok {
 		return
 	}
 
-	if err := h.GetService().DeleteHost(id); err != nil {
-		h.InternalError(c, err)
+	if err := service.DeleteHost(id); err != nil {
+		InternalError(c, err)
 		return
 	}
 
-	h.SuccessWithMsg(c, nil, "Host deleted successfully")
+	SuccessWithMsg(c, nil, "主机删除成功")
 }

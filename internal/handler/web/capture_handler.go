@@ -11,16 +11,6 @@ import (
 	"go.uber.org/zap"
 )
 
-type CaptureRequest struct {
-	ClientID        string   `json:"clientId"`
-	Host            string   `json:"host"`
-	Username        string   `json:"username"`
-	Password        string   `json:"password"`
-	Interfaces      []string `json:"interfaces"`
-	BPFFilter       string   `json:"bpfFilter"`
-	WiresharkFilter string   `json:"wiresharkFilter"`
-}
-
 // CaptureWebSocketHandler 处理抓包 WebSocket 连接
 func CaptureWebSocketHandler(c *gin.Context) {
 	sessionID := c.Query("session_id")
@@ -68,28 +58,23 @@ func UnregisterCaptureSession(sessionID string) {
 
 // StartCapture 开始抓包（Gin handler）
 func StartCapture(c *gin.Context) {
-	var req CaptureRequest
+	var req service.CaptureRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, entity.ApiResponse[any]{
-			Code: entity.Failure,
-			Msg:  "Invalid request body",
-		})
+		ValidationErrorWithStruct(c, err, req)
 		return
 	}
+	if req.DetailFormat == "" {
+		req.DetailFormat = "normal"
+	}
 
-	sessionID, err := service.StartCapture(req.Host, req.Username, req.Password, req.Interfaces, req.BPFFilter, req.WiresharkFilter)
+	taskInfo, err := service.StartCapture(req)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, entity.ApiResponse[any]{
-			Code: entity.Failure,
-			Msg:  err.Error(),
-		})
+		logger.Error("开启抓包失败", zap.Any("CaptureRequest", req), zap.Error(err))
+		InternalErrorWithMsg(c, err, "开启抓包失败")
 		return
 	}
 
-	c.JSON(http.StatusOK, entity.ApiResponse[any]{
-		Code: entity.Success,
-		Msg:  sessionID,
-	})
+	SuccessWithMsg(c, *taskInfo, "开启抓包成功")
 }
 
 // StopCapture 停止抓包（Gin handler）

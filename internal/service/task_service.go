@@ -7,22 +7,10 @@ import (
 	"webshark/internal/gorm"
 )
 
-// TaskService Task 服务
-type TaskService struct {
-	repo *gorm.WebSharkRepository
-}
-
-// NewTaskService 创建 Task 服务实例
-func NewTaskService(repo *gorm.WebSharkRepository) *TaskService {
-	return &TaskService{
-		repo: repo,
-	}
-}
-
 // CreateTaskRequest 创建任务请求
 type CreateTaskRequest struct {
-	TaskName        string   `json:"taskName" binding:"required"`
-	HostID          int64    `json:"hostId" binding:"required"`
+	TaskName        string   `json:"taskName" binding:"required" label:"任务名称"`
+	HostID          int64    `json:"hostId" binding:"required" label:"主机ID"`
 	Interfaces      []string `json:"interfaces"`
 	OnlyCapture     bool     `json:"onlyCapture"`
 	ParseDetail     bool     `json:"parseDetail"`
@@ -33,7 +21,7 @@ type CreateTaskRequest struct {
 
 // UpdateTaskRequest 更新任务请求
 type UpdateTaskRequest struct {
-	ID              int64    `json:"id" binding:"required"`
+	ID              int64    `json:"id" binding:"required" label:"任务ID"`
 	TaskName        string   `json:"taskName"`
 	Interfaces      []string `json:"interfaces"`
 	OnlyCapture     *bool    `json:"onlyCapture"`
@@ -44,7 +32,7 @@ type UpdateTaskRequest struct {
 }
 
 // CreateTask 创建任务
-func (s *TaskService) CreateTask(req *CreateTaskRequest) (*gorm.Task, error) {
+func CreateTask(req *CreateTaskRequest) (*gorm.Task, error) {
 	task := &gorm.Task{
 		TaskName:        req.TaskName,
 		HostID:          req.HostID,
@@ -56,7 +44,7 @@ func (s *TaskService) CreateTask(req *CreateTaskRequest) (*gorm.Task, error) {
 		WiresharkFilter: req.WiresharkFilter,
 	}
 
-	if err := s.repo.CreateTask(task); err != nil {
+	if err := gorm.Repo.CreateTask(task); err != nil {
 		return nil, fmt.Errorf("failed to create task: %w", err)
 	}
 
@@ -64,8 +52,8 @@ func (s *TaskService) CreateTask(req *CreateTaskRequest) (*gorm.Task, error) {
 }
 
 // GetTaskByID 根据 ID 获取任务
-func (s *TaskService) GetTaskByID(id int64) (*gorm.Task, error) {
-	task, err := s.repo.GetTaskByID(id)
+func GetTaskByID(id int64) (*gorm.Task, error) {
+	task, err := gorm.Repo.GetTaskByID(id)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get task: %w", err)
 	}
@@ -75,12 +63,11 @@ func (s *TaskService) GetTaskByID(id int64) (*gorm.Task, error) {
 
 // ListTasksRequest 获取任务列表请求
 type ListTasksRequest struct {
-	Page     int `form:"page" json:"page"`
-	PageSize int `form:"pageSize" json:"pageSize"`
+	entity.PageRequest
 }
 
 // ListTasks 获取任务列表
-func (s *TaskService) ListTasks(req *ListTasksRequest) (*entity.PageResponse[*gorm.Task], error) {
+func ListTasks(req *ListTasksRequest) (*entity.PageResponse[*gorm.Task], error) {
 	page := req.Page
 	pageSize := req.PageSize
 
@@ -91,7 +78,7 @@ func (s *TaskService) ListTasks(req *ListTasksRequest) (*entity.PageResponse[*go
 		pageSize = 10
 	}
 
-	tasks, total, err := s.repo.ListTasks(page, pageSize)
+	tasks, total, err := gorm.Repo.ListTasks(page, pageSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list tasks: %w", err)
 	}
@@ -101,13 +88,12 @@ func (s *TaskService) ListTasks(req *ListTasksRequest) (*entity.PageResponse[*go
 
 // ListTasksByHostIDRequest 根据主机 ID 获取任务列表请求
 type ListTasksByHostIDRequest struct {
-	HostID   int64 `form:"hostId" json:"hostId" binding:"required"`
-	Page     int   `form:"page" json:"page"`
-	PageSize int   `form:"pageSize" json:"pageSize"`
+	HostID int64 `form:"hostId" json:"hostId" binding:"required" label:"主机ID"`
+	entity.PageRequest
 }
 
 // ListTasksByHostID 根据主机 ID 获取任务列表
-func (s *TaskService) ListTasksByHostID(req *ListTasksByHostIDRequest) (*entity.PageResponse[*gorm.Task], error) {
+func ListTasksByHostID(req *ListTasksByHostIDRequest) (*entity.PageResponse[*gorm.Task], error) {
 	page := req.Page
 	pageSize := req.PageSize
 
@@ -118,7 +104,7 @@ func (s *TaskService) ListTasksByHostID(req *ListTasksByHostIDRequest) (*entity.
 		pageSize = 10
 	}
 
-	tasks, total, err := s.repo.ListTasksByHostID(req.HostID, page, pageSize)
+	tasks, total, err := gorm.Repo.ListTasksByHostID(req.HostID, page, pageSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list tasks by host: %w", err)
 	}
@@ -128,13 +114,12 @@ func (s *TaskService) ListTasksByHostID(req *ListTasksByHostIDRequest) (*entity.
 
 // ListTasksByTaskGroupIDRequest 根据任务组 ID 获取任务列表请求
 type ListTasksByTaskGroupIDRequest struct {
-	TaskGroupID int64 `form:"taskGroupId" json:"taskGroupId" binding:"required"`
-	Page        int   `form:"page" json:"page"`
-	PageSize    int   `form:"pageSize" json:"pageSize"`
+	TaskGroupID int64 `form:"taskGroupId" json:"taskGroupId" binding:"required" label:"任务组ID"`
+	entity.PageRequest
 }
 
 // ListTasksByTaskGroupID 根据任务组 ID 获取任务列表
-func (s *TaskService) ListTasksByTaskGroupID(req *ListTasksByTaskGroupIDRequest) (*entity.PageResponse[*gorm.Task], error) {
+func ListTasksByTaskGroupID(req *ListTasksByTaskGroupIDRequest) (*entity.PageResponse[*gorm.Task], error) {
 	page := req.Page
 	pageSize := req.PageSize
 
@@ -145,7 +130,7 @@ func (s *TaskService) ListTasksByTaskGroupID(req *ListTasksByTaskGroupIDRequest)
 		pageSize = 10
 	}
 
-	tasks, total, err := s.repo.ListTasksByTaskGroupID(req.TaskGroupID, page, pageSize)
+	tasks, total, err := gorm.Repo.ListTasksByTaskGroupID(req.TaskGroupID, page, pageSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list tasks by task group: %w", err)
 	}
@@ -154,9 +139,9 @@ func (s *TaskService) ListTasksByTaskGroupID(req *ListTasksByTaskGroupIDRequest)
 }
 
 // UpdateTask 更新任务
-func (s *TaskService) UpdateTask(req *UpdateTaskRequest) (*gorm.Task, error) {
+func UpdateTask(req *UpdateTaskRequest) (*gorm.Task, error) {
 	// 先获取现有记录
-	task, err := s.repo.GetTaskByID(req.ID)
+	task, err := gorm.Repo.GetTaskByID(req.ID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get task: %w", err)
 	}
@@ -184,7 +169,7 @@ func (s *TaskService) UpdateTask(req *UpdateTaskRequest) (*gorm.Task, error) {
 		task.WiresharkFilter = req.WiresharkFilter
 	}
 
-	if err := s.repo.UpdateTask(task); err != nil {
+	if err := gorm.Repo.UpdateTask(task); err != nil {
 		return nil, fmt.Errorf("failed to update task: %w", err)
 	}
 
@@ -192,8 +177,8 @@ func (s *TaskService) UpdateTask(req *UpdateTaskRequest) (*gorm.Task, error) {
 }
 
 // StopTask 停止任务（更新停止时间）
-func (s *TaskService) StopTask(id int64) error {
-	if err := s.repo.UpdateTaskStopTime(id, time.Now()); err != nil {
+func StopTask(id int64) error {
+	if err := gorm.Repo.UpdateTaskStopTime(id, time.Now()); err != nil {
 		return fmt.Errorf("failed to stop task: %w", err)
 	}
 
@@ -201,8 +186,8 @@ func (s *TaskService) StopTask(id int64) error {
 }
 
 // DeleteTask 删除任务
-func (s *TaskService) DeleteTask(id int64) error {
-	if err := s.repo.DeleteTask(id); err != nil {
+func DeleteTask(id int64) error {
+	if err := gorm.Repo.DeleteTask(id); err != nil {
 		return fmt.Errorf("failed to delete task: %w", err)
 	}
 

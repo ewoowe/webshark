@@ -12,10 +12,9 @@ const (
 
 // ApiResponse 基础响应结构
 type ApiResponse[T any] struct {
-	Code    ApiCode `json:"code"`
-	Message string  `json:"message"`
-	Msg     string  `json:"msg"`
-	Data    *T      `json:"data"`
+	Code ApiCode `json:"code"`
+	Msg  string  `json:"msg"`
+	Data T       `json:"data"`
 }
 
 // IsSuccess 判断请求是否成功
@@ -24,10 +23,10 @@ func (r *ApiResponse[T]) IsSuccess() bool {
 }
 
 // GetData 安全获取数据
-func (r *ApiResponse[T]) GetData() (*T, error) {
-	var zero *T
+func (r *ApiResponse[T]) GetData() (T, error) {
+	var zero T
 	if !r.IsSuccess() {
-		return zero, fmt.Errorf("请求失败: %s", r.Message)
+		return zero, fmt.Errorf("请求失败: %s", r.Msg)
 	}
 	return r.Data, nil
 }
