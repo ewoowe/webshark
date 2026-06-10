@@ -13,7 +13,7 @@ const (
 // ApiResponse 基础响应结构
 type ApiResponse[T any] struct {
 	Code ApiCode `json:"code"`
-	Msg  string  `json:"msg"`
+	Msg  string  `json:"message"`
 	Data T       `json:"data"`
 }
 

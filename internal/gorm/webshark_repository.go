@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	gormlogger "gorm.io/gorm/logger"
 )
 
@@ -324,9 +325,63 @@ func (r *WebSharkRepository) DeletePacketsByTaskID(taskID int64) error {
 	return r.packetRepo.DeleteByCondition("task_id = ?", taskID)
 }
 
+// UpdatePacket 更新数据包信息
+func (r *WebSharkRepository) UpdatePacket(packet *Packet) error {
+	return r.packetRepo.Update(packet)
+}
+
 // GetPacketCountByTaskID 获取任务的数据包总数
 func (r *WebSharkRepository) GetPacketCountByTaskID(taskID int64) (int64, error) {
 	return r.packetRepo.CountByCondition("task_id = ?", taskID)
+}
+
+// ListPacketsByTaskIDAndFrameNumber 根据任务 ID 和帧号范围获取数据包列表
+func (r *WebSharkRepository) ListPacketsByTaskIDAndFrameNumber(taskID int64, startFrameNumber, endFrameNumber int64, page, pageSize int) ([]*Packet, int64, error) {
+	query := "task_id = ? AND frame_number >= ? AND frame_number <= ?"
+	args := []interface{}{taskID, startFrameNumber, endFrameNumber}
+	return r.packetRepo.ListByCondition(query, args, page, pageSize, "frame_number ASC")
+}
+
+// GetMaxPacketNoByTaskGroupID 获取任务组内最大的包序号
+func (r *WebSharkRepository) GetMaxPacketNoByTaskGroupID(taskGroupID int64) (int64, error) {
+	var maxNo int64
+	// 通过子查询找到任务组内所有任务的包的最大 No 值
+	err := r.db.Model(&Packet{}).
+		Select("COALESCE(MAX(no), 0)").
+		Where("task_id IN (SELECT id FROM task WHERE task_group_id = ?)", taskGroupID).
+		Scan(&maxNo).Error
+	if err != nil {
+		return 0, err
+	}
+	return maxNo, nil
+}
+
+// AllocatePacketNoInTaskGroup 在任务组内分配唯一的包序号（使用数据库锁保证原子性）
+func (r *WebSharkRepository) AllocatePacketNoInTaskGroup(taskGroupID int64) (int64, error) {
+	var allocatedNo int64
+
+	// 使用事务和行级锁确保原子性
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		// 查询当前最大值并锁定相关行
+		var maxNo int64
+		err := tx.Model(&Packet{}).
+			Select("COALESCE(MAX(no), 0)").
+			Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("task_id IN (SELECT id FROM task WHERE task_group_id = ?)", taskGroupID).
+			Scan(&maxNo).Error
+		if err != nil {
+			return err
+		}
+
+		allocatedNo = maxNo + 1
+		return nil
+	})
+
+	if err != nil {
+		return 0, err
+	}
+
+	return allocatedNo, nil
 }
 
 // ==================== Process 增删改查 ====================

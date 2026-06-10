@@ -1,9 +1,10 @@
-package web
+package event
 
 import (
 	"context"
 	"encoding/json"
 	"webshark/internal/logger"
+	"webshark/internal/service"
 	"webshark/internal/websocket"
 
 	"go.uber.org/zap"
@@ -45,4 +46,20 @@ func (h *CaptureSessionHandler) GetEventType() []websocket.EventType {
 	captureSessionType := websocket.NewEventType("CaptureSession")
 	websocket.RegisterEventType(captureSessionType)
 	return []websocket.EventType{captureSessionType}
+}
+
+// RegisterCaptureSession 注册抓包会话与客户端的关联
+func RegisterCaptureSession(clientID, sessionID string) {
+	broadcaster := service.GetPacketBroadcaster()
+	broadcaster.RegisterSessionClient(sessionID, clientID)
+	logger.Info("注册抓包会话",
+		zap.String("clientID", clientID),
+		zap.String("sessionID", sessionID))
+}
+
+// UnregisterCaptureSession 注销抓包会话与客户端的关联
+func UnregisterCaptureSession(sessionID string) {
+	broadcaster := service.GetPacketBroadcaster()
+	broadcaster.UnregisterSessionClient(sessionID)
+	logger.Info("注销抓包会话", zap.String("sessionID", sessionID))
 }

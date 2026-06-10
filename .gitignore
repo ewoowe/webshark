@@ -71,3 +71,4 @@ web/yarn-error.log
 *.key
 id_rsa
 id_rsa.pub
+/pcaps

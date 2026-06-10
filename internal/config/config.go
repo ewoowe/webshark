@@ -17,12 +17,13 @@ var (
 
 // Config 配置结构体
 type Config struct {
-	App      AppConfig    `mapstructure:"app"`
-	Server   ServerConfig `mapstructure:"web"`
-	Log      LogConfig    `mapstructure:"log"`
-	Nacos    NacosConfig  `mapstructure:"tnacos"`
-	Database *DBConfig    `mapstructure:"database"`
-	Output   OutputConfig `mapstructure:"output"`
+	App      AppConfig     `mapstructure:"app"`
+	Server   ServerConfig  `mapstructure:"web"`
+	Log      LogConfig     `mapstructure:"log"`
+	Nacos    NacosConfig   `mapstructure:"tnacos"`
+	Database *DBConfig     `mapstructure:"database"`
+	Output   OutputConfig  `mapstructure:"output"`
+	Capture  CaptureConfig `mapstructure:"capture"`
 }
 
 // NacosConfig Nacos 配置
@@ -79,6 +80,13 @@ type LogRotateConfig struct {
 	MaxBackups int    `mapstructure:"max_backups"` // 保留的旧日志文件数量
 	MaxAge     int    `mapstructure:"max_age"`     // 日志文件保留天数
 	Compress   bool   `mapstructure:"compress"`    // 是否压缩旧日志
+}
+
+// CaptureConfig 抓包配置
+type CaptureConfig struct {
+	TsharkPath string `mapstructure:"tshark"` // tshark 命令路径
+	PcapDir    string `mapstructure:"pcap"`   // PCAP 文件存储目录
+	FifoDir    string `mapstructure:"fifo"`   // FIFO 命名管道目录
 }
 
 // InitConfig 初始化配置
@@ -158,6 +166,10 @@ func setDefaults() {
 
 	// 输出控制默认配置
 	cfg.SetDefault("output.enable_sql_log", false) // SQL 日志默认关闭，避免性能影响
+
+	// 抓包默认配置
+	cfg.SetDefault("capture.pcap", "./pcaps")       // PCAP 文件存储目录
+	cfg.SetDefault("capture.fifo", "/tmp/webshark") // FIFO 命名管道目录
 }
 
 // GetViper 获取 viper 实例（用于高级操作）
@@ -183,4 +195,28 @@ func GetConfig() (*Config, error) {
 	}
 
 	return &config, nil
+}
+
+// GetCapturePcapDir 获取 PCAP 文件存储目录
+func GetCapturePcapDir() string {
+	if cfg == nil {
+		InitConfig("")
+	}
+	return cfg.GetString("capture.pcap")
+}
+
+// GetCaptureFifoDir 获取 FIFO 命名管道目录
+func GetCaptureFifoDir() string {
+	if cfg == nil {
+		InitConfig("")
+	}
+	return cfg.GetString("capture.fifo")
+}
+
+// GetCaptureTsharkPath 获取 tshark 命令路径
+func GetCaptureTsharkPath() string {
+	if cfg == nil {
+		InitConfig("")
+	}
+	return cfg.GetString("capture.tshark")
 }

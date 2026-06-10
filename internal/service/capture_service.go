@@ -1,17 +1,132 @@
 package service
 
 import (
-	"bytes"
-	"encoding/json"
+	"bufio"
 	"fmt"
 	"io"
-	"log"
+	"maps"
+	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
+	"webshark/internal/config"
+	"webshark/internal/gorm"
+	"webshark/internal/logger"
+	"webshark/internal/utils"
+
+	"go.uber.org/zap"
 )
+
+// packetNoCounter 任务组级别的包序号计数器（使用原子操作保证线程安全）
+var packetNoCounter = struct {
+	counters map[int64]*atomic.Int64
+	sync.RWMutex
+}{
+	counters: make(map[int64]*atomic.Int64),
+}
+
+// packetDetailCache 数据包详情缓存（用于处理时序问题）
+type packetDetailKey struct {
+	TaskID      int64
+	FrameNumber int64
+}
+
+var packetDetailCache = struct {
+	cache map[packetDetailKey]string
+	sync.RWMutex
+}{
+	cache: make(map[packetDetailKey]string),
+}
+
+// cachePacketDetail 缓存数据包详情
+func cachePacketDetail(taskID, frameNumber int64, content string) {
+	packetDetailCache.Lock()
+	defer packetDetailCache.Unlock()
+	key := packetDetailKey{TaskID: taskID, FrameNumber: frameNumber}
+	packetDetailCache.cache[key] = content
+}
+
+// getAndRemoveCachedDetail 获取并删除缓存的数据包详情
+func getAndRemoveCachedDetail(taskID, frameNumber int64) (string, bool) {
+	packetDetailCache.Lock()
+	defer packetDetailCache.Unlock()
+	key := packetDetailKey{TaskID: taskID, FrameNumber: frameNumber}
+	content, exists := packetDetailCache.cache[key]
+	if exists {
+		delete(packetDetailCache.cache, key)
+	}
+	return content, exists
+}
+
+// retryCachedDetails 定期重试缓存中的详情更新
+func retryCachedDetails() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		packetDetailCache.RLock()
+		keys := make([]packetDetailKey, 0, len(packetDetailCache.cache))
+		for k := range packetDetailCache.cache {
+			keys = append(keys, k)
+		}
+		packetDetailCache.RUnlock()
+
+		for _, key := range keys {
+			compressedContent, exists := getAndRemoveCachedDetail(key.TaskID, key.FrameNumber)
+			if !exists {
+				continue
+			}
+
+			// 尝试更新（缓存中已是压缩后的数据）
+			if err := updatePacketContentWithCompressed(key.TaskID, key.FrameNumber, compressedContent); err != nil {
+				logger.Debug("Retry update packet content failed, re-caching",
+					zap.Int64("taskID", key.TaskID),
+					zap.Int64("frameNumber", key.FrameNumber),
+					zap.Error(err))
+				// 重新放回缓存
+				cachePacketDetail(key.TaskID, key.FrameNumber, compressedContent)
+			} else {
+				logger.Debug("Retry update packet content succeeded",
+					zap.Int64("taskID", key.TaskID),
+					zap.Int64("frameNumber", key.FrameNumber))
+			}
+		}
+	}
+}
+
+func init() {
+	// 启动定期重试缓存中数据包详情的后台协程
+	go retryCachedDetails()
+}
+
+// getOrCreateCounter 获取或创建任务组的计数器
+func getOrCreateCounter(taskGroupID int64) *atomic.Int64 {
+	// 先尝试读取
+	packetNoCounter.RLock()
+	if counter, exists := packetNoCounter.counters[taskGroupID]; exists {
+		packetNoCounter.RUnlock()
+		return counter
+	}
+	packetNoCounter.RUnlock()
+
+	// 需要创建新的计数器
+	packetNoCounter.Lock()
+	defer packetNoCounter.Unlock()
+
+	// 双重检查，避免并发创建
+	if counter, exists := packetNoCounter.counters[taskGroupID]; exists {
+		return counter
+	}
+
+	counter := &atomic.Int64{}
+	counter.Store(0)
+	packetNoCounter.counters[taskGroupID] = counter
+	return counter
+}
 
 type CaptureRequest struct {
 	TaskName     string        `json:"taskName" binding:"required" label:"任务名称"`            // 任务名称
@@ -22,450 +137,853 @@ type CaptureRequest struct {
 }
 
 type HostCapture struct {
-	HostID   string              `json:"hostId" binding:"required" label:"目标主机ID"`        // 目标主机ID
+	HostID   int                 `json:"hostId" binding:"required" label:"目标主机ID"`        // 目标主机ID
 	Captures []HostSingleCapture `json:"captures" binding:"required,dive" label:"抓包任务列表"` // 多组抓包任务的配置
 }
 
 type HostSingleCapture struct {
-	StreamID        string   `json:"streamId" binding:"required" label:"抓包流序号"` // 抓包流序号
+	StreamID        int      `json:"streamId" binding:"required" label:"抓包流序号"` // 抓包流序号
 	Interfaces      []string `json:"interfaces"`                                // 本次抓包流所在的网卡
 	BPFFilter       string   `json:"bpfFilter"`                                 // BPF 过滤器
 	WiresharkFilter string   `json:"wiresharkFilter"`                           // Wireshark 过滤器
 }
 
 type TaskInfo struct {
-	TaskGroupID int64   `json:"taskGroupId"` // 任务组ID
-	TaskIDs     []int64 `json:"taskIds"`     // 任务ID列表
-}
-
-type CaptureSession struct {
-	SessionID       string
-	Host            string
-	Username        string
-	Password        string
-	Interfaces      []string
-	BPFFilter       string
-	WiresharkFilter string
-	Cmd             *exec.Cmd
-	Stdout          io.ReadCloser
-	IsActive        bool
-}
-
-var (
-	sessions     = make(map[string]*CaptureSession)
-	sessionsLock sync.RWMutex
-)
-
-// PacketData 表示一个捕获的数据包
-type PacketData struct {
-	Frame     int               `json:"frame"`
-	Timestamp string            `json:"timestamp"`
-	Source    string            `json:"source"`
-	Dest      string            `json:"dest"`
-	Protocol  string            `json:"protocol"`
-	Length    int               `json:"length"`
-	Info      string            `json:"info"`
-	Details   map[string]string `json:"details,omitempty"`
+	TaskGroupID int64         `json:"taskGroupId"` // 任务组ID，如果不是批量任务，则返回负数
+	TaskIDs     map[int]int64 `json:"taskIds"`     // 抓包流序号与taskId映射关系
 }
 
 func StartCapture(captureRequest CaptureRequest) (*TaskInfo, error) {
+	var taskInfo TaskInfo
+	isTaskGroup := false
+	if len(captureRequest.HostCaptures) > 1 {
+		isTaskGroup = true
+	} else if len(captureRequest.HostCaptures[0].Captures) > 1 {
+		isTaskGroup = true
+	}
 
-	return nil, nil
+	if isTaskGroup {
+		taskGroup := gorm.TaskGroup{
+			TaskGroupName: captureRequest.TaskName,
+		}
+		err := gorm.Repo.CreateTaskGroup(&taskGroup)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create task group: %v", err)
+		}
+		taskInfo.TaskGroupID = taskGroup.ID
+		taskInfo.TaskIDs = make(map[int]int64)
+
+		errOccurred := false
+		for _, hostCapture := range captureRequest.HostCaptures {
+			streamIdMapTask, err := startHostCaptures(taskGroup.ID, captureRequest.TaskName, captureRequest.OnlyCapture, captureRequest.ParseDetail, captureRequest.DetailFormat, hostCapture)
+			if err != nil {
+				logger.Error("Failed to start host captures", zap.Error(err))
+				// 继续执行其他主机的任务
+				errOccurred = true
+			}
+			maps.Copy(taskInfo.TaskIDs, streamIdMapTask)
+		}
+
+		if errOccurred {
+			return &taskInfo, fmt.Errorf("some errors occurred while starting host captures")
+		}
+
+		return &taskInfo, nil
+	}
+
+	taskInfo.TaskIDs = make(map[int]int64)
+	streamIdMapTask, err := startHostCaptures(-1, captureRequest.TaskName, captureRequest.OnlyCapture, captureRequest.ParseDetail, captureRequest.DetailFormat, captureRequest.HostCaptures[0])
+	if err != nil {
+		return nil, fmt.Errorf("failed to start host captures: %v", err)
+	}
+	maps.Copy(taskInfo.TaskIDs, streamIdMapTask)
+	return &taskInfo, nil
 }
 
-func StartCaptureOld(host, username, password string, interfaces []string, bpfFilter, wiresharkFilter string) (string, error) {
-	sessionID := fmt.Sprintf("session_%d", time.Now().UnixNano())
+// startHostCaptures 启动单个主机上的多个抓包任务
+func startHostCaptures(taskGroupID int64, taskName string, onlyCapture bool, parseDetail bool, detailFormat string, hostCapture HostCapture) (map[int]int64, error) {
+	streamIdMapTask := make(map[int]int64)
 
-	// 如果没有选择网卡，macOS 使用 lo0，Linux 使用 any
-	if len(interfaces) == 0 {
-		// 先检测系统类型
-		osType, err := detectRemoteOS(host, username, password)
+	// 获取主机信息
+	host, err := GetHostByID(int64(hostCapture.HostID))
+	if err != nil {
+		return nil, fmt.Errorf("failed to get host info: %v", err)
+	}
+
+	// 为该主机上的每个抓包流启动任务
+	for _, capture := range hostCapture.Captures {
+		taskID, err := startSingleCapture(taskGroupID, taskName, onlyCapture, parseDetail, detailFormat, host, capture)
 		if err != nil {
-			log.Printf("Failed to detect remote OS, using default: %v", err)
-			interfaces = []string{"any"} // Linux 默认
-		} else if osType == "darwin" {
-			interfaces = []string{"any"} // macOS 默认使用 en0（通常是 WiFi 或以太网）
-		} else {
-			interfaces = []string{"any"}
+			logger.Error("Failed to start single capture",
+				zap.String("host", host.IP),
+				zap.Int("streamId", capture.StreamID),
+				zap.Error(err))
+			continue
+		}
+		streamIdMapTask[capture.StreamID] = taskID
+	}
+
+	return streamIdMapTask, nil
+}
+
+// startSingleCapture 启动单个抓包任务，返回任务ID
+func startSingleCapture(taskGroupID int64, taskName string, onlyCapture bool, parseDetail bool, detailFormat string, host *gorm.Host, capture HostSingleCapture) (int64, error) {
+	// 1. 先创建任务记录（不包含文件路径）
+	task := gorm.Task{
+		TaskName:        taskName,
+		StreamID:        int8(capture.StreamID),
+		HostID:          host.ID,
+		Interfaces:      capture.Interfaces,
+		OnlyCapture:     onlyCapture,
+		ParseDetail:     parseDetail,
+		DetailFormat:    detailFormat,
+		BpfFilter:       capture.BPFFilter,
+		WiresharkFilter: capture.WiresharkFilter,
+		TaskGroupId:     taskGroupID,
+		Status:          "created",
+		CreatedAt:       time.Now(), // 显式设置创建时间
+	}
+
+	// 如果 TaskGroupID 为负数，说明不是任务组
+	if taskGroupID < 0 {
+		task.TaskGroupId = 0
+	}
+
+	err := gorm.Repo.CreateTask(&task)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create task: %v", err)
+	}
+
+	// 2. 使用任务ID生成文件路径
+	pcapPath, fifoPath, err := GenerateCapturePaths(task.ID)
+	if err != nil {
+		return task.ID, fmt.Errorf("failed to generate paths: %v", err)
+	}
+
+	// 3. 更新任务的文件路径
+	task.FilePath = pcapPath
+	task.FifoPath = fifoPath
+	err = gorm.Repo.UpdateTask(&task)
+	if err != nil {
+		return task.ID, fmt.Errorf("failed to update task file paths: %v", err)
+	}
+
+	// 4. 构建并执行抓包命令
+	cmd, fullCommand, err := buildCaptureCommand(host, capture, pcapPath, fifoPath, onlyCapture, parseDetail, detailFormat)
+	if err != nil {
+		return task.ID, fmt.Errorf("failed to build command: %v", err)
+	}
+
+	// 4.1 保存完整命令到数据库
+	task.FullCommand = fullCommand
+	err = gorm.Repo.UpdateTask(&task)
+	if err != nil {
+		logger.Warn("Failed to update task full command", zap.Error(err))
+	}
+
+	// 5. 启动进程前先设置stderr和stdout捕获
+	var stderr strings.Builder
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		logger.Warn("Failed to create stderr pipe", zap.Error(err))
+	} else {
+		// 启动一个协程读取stderr
+		go func() {
+			buf := make([]byte, 4096)
+			for {
+				n, readErr := stderrPipe.Read(buf)
+				if n > 0 {
+					stderr.Write(buf[:n])
+				}
+				if readErr != nil {
+					break
+				}
+			}
+		}()
+	}
+
+	// 如果需要解析概览，先获取stdout pipe（必须在Start之前）
+	var stdout io.ReadCloser
+	if !onlyCapture {
+		stdout, err = cmd.StdoutPipe()
+		if err != nil {
+			logger.Error("Failed to create stdout pipe", zap.Error(err))
+			return task.ID, fmt.Errorf("failed to create stdout pipe: %v", err)
 		}
 	}
 
-	// 构建 tcpdump 命令
-	var ifaceArgs string
-	if len(interfaces) == 1 {
-		ifaceArgs = fmt.Sprintf("-i %s", interfaces[0])
+	if err := cmd.Start(); err != nil {
+		task.Status = "failed"
+		task.Message = fmt.Sprintf("Failed to start process: %v", err)
+		gorm.Repo.UpdateTask(&task)
+		return task.ID, fmt.Errorf("failed to start process: %v", err)
+	}
+
+	// 6. 保存进程信息（包含完整命令）
+	process := gorm.Process{
+		TaskID: task.ID,
+		Pid:    int64(cmd.Process.Pid),
+		Ppid:   getProcessPpidByProc(int(cmd.Process.Pid)), // 使用方法1：从 /proc 读取
+		// Ppid: getProcessPpidByPs(int(cmd.Process.Pid)),  // 或者方法2：使用 ps 命令
+		Type:    "sshpass",
+		Command: cmd.String(),
+		Alive:   true,
+	}
+	err = gorm.Repo.CreateProcess(&process)
+	if err != nil {
+		logger.Error("Failed to create process record", zap.Error(err))
+	}
+
+	// 7. 启动协程监控进程状态并传递stderr
+	go monitorProcessStatusWithStderr(task.ID, cmd, &stderr)
+
+	// 8. 如果需要解析概览，启动协程实时解析输出（传递已获取的stdout）
+	if !onlyCapture {
+		go parseOverviewFromOutput(task.ID, task.TaskGroupId, stdout, parseDetail, detailFormat, fifoPath, pcapPath)
+	}
+	logger.Info("Capture started",
+		zap.Int64("taskId", task.ID),
+		zap.String("host", host.IP),
+		zap.String("pcapPath", pcapPath))
+
+	return task.ID, nil
+}
+
+// getInterfaceName 获取网卡名称，如果为空则返回 "any"
+func getInterfaceName(interfaces []string) string {
+	if len(interfaces) == 0 {
+		return "any"
+	}
+	return interfaces[0]
+}
+
+// buildCaptureCommand 构建抓包命令
+// 命令结构:
+//
+//	sshpass -p 'password' ssh user@host 'tcpdump -i eth0 -U -w - bpf_filter' | \
+//	  tee output.pcap fifo | \
+//	  (如果需要解析: tshark -T json -r - > fifo)
+func buildCaptureCommand(host *gorm.Host, capture HostSingleCapture, pcapPath, fifoPath string, onlyCapture bool, parseDetail bool, detailFormat string) (*exec.Cmd, string, error) {
+	// 1. 构建 tcpdump 命令
+	var interfaceArgs []string
+	if len(capture.Interfaces) == 0 {
+		interfaceArgs = append(interfaceArgs, "-i any")
 	} else {
-		// 多个网卡需要多个 -i 参数（tcpdump 可能不支持，这里简化处理）
-		ifaceArgs = fmt.Sprintf("-i %s", strings.Join(interfaces, " -i "))
+		// 为每个网卡添加 -i 参数
+		for _, iface := range capture.Interfaces {
+			interfaceArgs = append(interfaceArgs, fmt.Sprintf("-i %s", iface))
+		}
+	}
+	interfaceArg := strings.Join(interfaceArgs, " ")
+
+	bpfFilter := ""
+	if capture.BPFFilter != "" {
+		bpfFilter = fmt.Sprintf("'%s'", capture.BPFFilter)
 	}
 
-	bpfArg := ""
-	if bpfFilter != "" {
-		bpfArg = fmt.Sprintf("'%s'", bpfFilter)
-	}
+	// tcpdump 命令：使用 -U 使输出无缓冲，-w - 输出到 stdout
+	// 注意：不要重定向 stderr，以便捕获错误信息
+	// 使用 sudo 提升权限以允许抓包
+	tcpdumpCmd := fmt.Sprintf("sudo tcpdump %s -U -w - %s", interfaceArg, bpfFilter)
 
-	// 检测远程系统类型以优化命令
-	osType, _ := detectRemoteOS(host, username, password)
+	// 2. 构建 ssh 命令
+	sshCmd := fmt.Sprintf("sshpass -p '%s' ssh -o StrictHostKeyChecking=no %s@%s '%s'",
+		host.Password, host.UserName, host.IP, tcpdumpCmd)
 
-	// 尝试配置 sudo 权限（如果失败也不影响，继续执行）
-	//configureSudoPermissions(host, username, password, osType)
+	// 3. 根据是否需要解析，构建完整的管道命令
+	var fullCommand string
 
-	var command string
-	if osType == "darwin" {
-		// macOS 的 tcpdump 可能需要不同的参数
-		// 使用 -l 使 tcpdump 行缓冲，添加 -c 0 不限制包数量
-		command = fmt.Sprintf(
-			"sshpass -p '%s' ssh -o StrictHostKeyChecking=no %s@%s 'sudo -n tcpdump %s -U -w - %s 2>/dev/null' | tshark -T json -r - -l",
-			password, username, host, ifaceArgs, bpfArg,
-		)
+	if onlyCapture {
+		// 只抓包，不解析：直接保存到 pcap 文件
+		fullCommand = fmt.Sprintf("%s > %s", sshCmd, pcapPath)
+	} else if !parseDetail {
+		// 解析概览：使用 tee 保存 pcap，同时用 tshark 实时解析
+		// ssh ... | tee pcap | tshark -l -i - -T fields -E separator='|' -e frame.number -e frame.time_epoch -e ip.src -e ip.dst -e _ws.col.Protocol -e frame.len -e _ws.col.Info
+		fullCommand = fmt.Sprintf("%s | tee %s | tshark -l -i - -T fields -E separator='|' -e frame.number -e frame.time_epoch -e ip.src -e ip.dst -e _ws.col.Protocol -e frame.len -e _ws.col.Info",
+			sshCmd, pcapPath)
 	} else {
-		// Linux
-		command = fmt.Sprintf(
-			"sshpass -p '%s' ssh -o StrictHostKeyChecking=no %s@%s 'sudo -n tcpdump %s -U -w - %s 2>/dev/null' | tshark -T json -r - -l",
-			password, username, host, ifaceArgs, bpfArg,
-		)
+		// 解析详情：使用 tee 保存 pcap，同时复制流量到 fifo
+		// ssh ... | tee pcap fifo | tshark -l -i - -T fields -E separator='|' -e frame.number -e frame.time_epoch -e ip.src -e ip.dst -e _ws.col.Protocol -e frame.len -e _ws.col.Info
+		// 然后由另一个 tshark 进程读取 fifo
+		fullCommand = fmt.Sprintf("%s | tee %s %s | tshark -l -i - -T fields -E separator='|' -e frame.number -e frame.time_epoch -e ip.src -e ip.dst -e _ws.col.Protocol -e frame.len -e _ws.col.Info",
+			sshCmd, pcapPath, fifoPath)
 	}
 
-	cmd := exec.Command("bash", "-c", command)
+	cmd := exec.Command("bash", "-c", fullCommand)
+
 	// 设置进程组，以便后续可以一起终止所有子进程
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,
 	}
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", fmt.Errorf("failed to create stdout pipe: %v", err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("failed to start capture: %v", err)
-	}
-
-	session := &CaptureSession{
-		SessionID:       sessionID,
-		Host:            host,
-		Username:        username,
-		Password:        password,
-		Interfaces:      interfaces,
-		BPFFilter:       bpfFilter,
-		WiresharkFilter: wiresharkFilter,
-		Cmd:             cmd,
-		Stdout:          stdout,
-		IsActive:        true,
-	}
-
-	sessionsLock.Lock()
-	sessions[sessionID] = session
-	sessionsLock.Unlock()
-
-	// 启动 goroutine 读取并解析数据包
-	go readAndParsePackets(session, wiresharkFilter)
-
-	return sessionID, nil
+	// 返回命令和完整命令字符串
+	return cmd, fullCommand, nil
 }
 
-// detectRemoteOS 检测远程主机的操作系统类型
-func detectRemoteOS(host, username, password string) (string, error) {
-	cmd := exec.Command("sshpass", "-p", password, "ssh", "-o", "StrictHostKeyChecking=no",
-		fmt.Sprintf("%s@%s", username, host),
-		"uname -s")
+// monitorProcessStatus 监控进程状态，等待进程结束并更新数据库
+func monitorProcessStatus(taskID int64, cmd *exec.Cmd) {
+	// 等待命令执行完成
+	err := cmd.Wait()
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
+	// 更新任务状态
+	task, _ := gorm.Repo.GetTaskByID(taskID)
 	if err != nil {
-		return "", fmt.Errorf("failed to detect OS: %v, stderr: %s", err, stderr.String())
+		task.Status = "stopped"
+		now := time.Now()
+		task.StopAt = &now
+		task.Message = fmt.Sprintf("Process exited: %v", err)
+	} else {
+		task.Status = "stopped"
+		now := time.Now()
+		task.StopAt = &now
+		task.Message = "Normal exit"
+	}
+	gorm.Repo.UpdateTask(task)
+
+	// 更新进程状态
+	processes, err := gorm.Repo.ListProcessesByTaskID(taskID)
+	if err == nil && len(processes) > 0 {
+		processes[0].Alive = false
+		gorm.Repo.UpdateProcess(processes[0])
 	}
 
-	osName := strings.TrimSpace(stdout.String())
-	switch osName {
-	case "Darwin":
-		return "darwin", nil
-	case "Linux":
-		return "linux", nil
-	default:
-		return osName, nil
+	logger.Info("Capture process stopped",
+		zap.Int64("taskID", taskID),
+		zap.String("status", task.Status),
+		zap.String("message", task.Message),
+		zap.Duration("duration", time.Since(task.CreatedAt)))
+}
+
+// monitorProcessStatusWithStderr 监控进程状态并捕获stderr输出
+func monitorProcessStatusWithStderr(taskID int64, cmd *exec.Cmd, stderr *strings.Builder) {
+	// 等待命令执行完成
+	err := cmd.Wait()
+
+	// 更新任务状态
+	task, _ := gorm.Repo.GetTaskByID(taskID)
+	if err != nil {
+		task.Status = "failed"
+		now := time.Now()
+		task.StopAt = &now
+		// 包含stderr输出以便调试
+		errMsg := fmt.Sprintf("Process exited: %v", err)
+		if stderr != nil && stderr.Len() > 0 {
+			errMsg += fmt.Sprintf(", stderr: %s", strings.TrimSpace(stderr.String()))
+		}
+		task.Message = errMsg
+	} else {
+		task.Status = "stopped"
+		now := time.Now()
+		task.StopAt = &now
+		if stderr != nil && stderr.Len() > 0 {
+			task.Message = fmt.Sprintf("Normal exit with warnings: %s", strings.TrimSpace(stderr.String()))
+		} else {
+			task.Message = "Normal exit"
+		}
+	}
+	gorm.Repo.UpdateTask(task)
+
+	// 更新进程状态
+	processes, listErr := gorm.Repo.ListProcessesByTaskID(taskID)
+	if listErr == nil && len(processes) > 0 {
+		processes[0].Alive = false
+		gorm.Repo.UpdateProcess(processes[0])
+	}
+
+	logger.Info("Capture process stopped",
+		zap.Int64("taskID", taskID),
+		zap.String("status", task.Status),
+		zap.String("message", task.Message),
+		zap.Duration("duration", time.Since(task.CreatedAt)))
+}
+
+// parseOverviewFromOutput 从进程输出实时解析数据包概览
+func parseOverviewFromOutput(taskID int64, taskGroupID int64, stdout io.ReadCloser, parseDetail bool, detailFormat string, fifoPath string, pcapPath string) {
+	defer stdout.Close()
+
+	// 使用 bufio.Scanner 逐行读取
+	scanner := bufio.NewScanner(stdout)
+	// 增加缓冲区大小以支持长行
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+
+	packetCounter := int64(0)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+
+		logger.Debug(line)
+		// 解析单个数据包
+		packet, err := parseTsharkFieldsLine(line, taskID, packetCounter+1, taskGroupID)
+		if err != nil {
+			logger.Error("Failed to parse tshark fields line",
+				zap.String("line", line),
+				zap.Error(err))
+			continue
+		}
+
+		// 保存到数据库
+		if err := gorm.Repo.CreatePacket(packet); err != nil {
+			logger.Error("Failed to save packet", zap.Error(err))
+			continue
+		}
+
+		// 检查缓存中是否有该数据包的详情，如果有则立即更新
+		if cachedContent, exists := getAndRemoveCachedDetail(taskID, packet.FrameNumber); exists {
+			go func(tid, fnum int64, content string) {
+				if err := updatePacketContentWithCompressed(tid, fnum, content); err != nil {
+					logger.Debug("Update cached packet detail failed",
+						zap.Int64("taskID", tid),
+						zap.Int64("frameNumber", fnum),
+						zap.Error(err))
+				}
+			}(taskID, packet.FrameNumber, cachedContent)
+		}
+
+		packetCounter++
+	}
+
+	if err := scanner.Err(); err != nil {
+		logger.Error("Overview scanner error", zap.Error(err))
+	}
+
+	logger.Info("Overview parsing completed",
+		zap.Int64("taskID", taskID),
+		zap.Int64("packetCount", packetCounter))
+
+	// 如果需要解析详情，启动详情解析进程
+	if parseDetail {
+		go parsePacketDetails(taskID, fifoPath, detailFormat)
 	}
 }
 
-// configureSudoPermissions 尝试配置远程主机的 sudo 权限
-func configureSudoPermissions(host, username, password, osType string) {
-	log.Printf("Attempting to configure sudo permissions for %s@%s", username, host)
+// startTsharkParser 启动 tshark 进程解析 pcap 文件并保存 Packet 记录
+func startTsharkParser(taskID int64, taskGroupID int64, pcapPath string, parseDetail bool) error {
+	// 从配置中读取 tshark 路径
+	tsharkPath := config.GetCaptureTsharkPath()
+	if tsharkPath == "" {
+		tsharkPath = "tshark" // 默认使用 PATH 中的 tshark
+	}
 
-	// 方法1: 尝试使用 visudo 添加 NOPASSWD 配置（需要已经有 sudo 权限）
-	visudoCmd := fmt.Sprintf(
-		"echo '%s ALL=(ALL) NOPASSWD: /usr/sbin/tcpdump' | sudo tee -a /etc/sudoers.d/tcpdump && sudo chmod 440 /etc/sudoers.d/tcpdump",
-		username,
+	// 构建 tshark 命令，使用 fields 格式输出（更高效）
+	// 输出格式: frame.number|frame.time_epoch|ip.src|ip.dst|Protocol|Info
+	cmd := exec.Command(tsharkPath, "-r", pcapPath,
+		"-T", "fields",
+		"-E", "separator=|",
+		"-e", "frame.number",
+		"-e", "frame.time_epoch",
+		"-e", "ip.src",
+		"-e", "ip.dst",
+		"-e", "_ws.col.Protocol",
+		"-e", "_ws.col.Info",
 	)
 
-	cmd := exec.Command("sshpass", "-p", password, "ssh", "-o", "StrictHostKeyChecking=no",
-		fmt.Sprintf("%s@%s", username, host),
-		visudoCmd)
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	if err == nil {
-		log.Printf("Successfully configured sudo NOPASSWD for tcpdump")
-		return
+	// 获取标准输出
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stdout pipe: %v", err)
 	}
 
-	log.Printf("Failed to configure sudo via visudo: %v, stderr: %s", err, stderr.String())
-	log.Printf("Note: You may need to manually configure sudo on the remote host")
-	log.Printf("See TSHARK_JSON_FIX.md for instructions")
-}
-
-func StopCapture(sessionID string) error {
-	sessionsLock.Lock()
-	defer sessionsLock.Unlock()
-
-	session, exists := sessions[sessionID]
-	if !exists {
-		return fmt.Errorf("session not found: %s", sessionID)
+	// 启动进程
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start tshark: %v", err)
 	}
 
-	if session.Cmd != nil && session.IsActive {
-		// 使用进程组来终止所有子进程
-		// 发送 SIGTERM 信号给整个进程组
-		if session.Cmd.Process != nil {
-			// 首先尝试优雅地终止
-			pgid, err := syscall.Getpgid(session.Cmd.Process.Pid)
-			if err == nil {
-				// 杀死整个进程组
-				syscall.Kill(-pgid, syscall.SIGTERM)
-				log.Printf("Sent SIGTERM to process group %d", pgid)
-			} else {
-				// 如果获取进程组失败，只杀死主进程
-				log.Printf("Failed to get process group, killing main process only: %v", err)
-				session.Cmd.Process.Signal(syscall.SIGTERM)
+	// 保存 tshark 进程信息
+	process := gorm.Process{
+		TaskID: taskID,
+		Pid:    int64(cmd.Process.Pid),
+		Ppid:   getProcessPpidByProc(int(cmd.Process.Pid)), // 使用方法1：从 /proc 读取
+		// Ppid: getProcessPpidByPs(int(cmd.Process.Pid)),  // 或者方法2：使用 ps 命令
+		Type:    "tshark",
+		Command: cmd.String(),
+		Alive:   true,
+	}
+	gorm.Repo.CreateProcess(&process)
+
+	// 异步解析 tshark 输出
+	go func() {
+		defer stdout.Close()
+
+		// 使用 bufio.Scanner 逐行读取
+		scanner := bufio.NewScanner(stdout)
+		// 增加缓冲区大小以支持长行
+		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+
+		packetCounter := int64(0)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if line == "" {
+				continue
 			}
 
-			// 等待一小段时间让进程退出
-			done := make(chan error, 1)
-			go func() {
-				done <- session.Cmd.Wait()
-			}()
-
-			// 超时后强制杀死
-			select {
-			case <-done:
-				log.Printf("Process exited cleanly")
-			case <-time.After(3 * time.Second):
-				log.Printf("Process did not exit, sending SIGKILL")
-				if pgid, err := syscall.Getpgid(session.Cmd.Process.Pid); err == nil {
-					syscall.Kill(-pgid, syscall.SIGKILL)
-				} else {
-					session.Cmd.Process.Kill()
-				}
+			// 解析单个数据包
+			packet, err := parseTsharkFieldsLine(line, taskID, packetCounter+1, taskGroupID)
+			if err != nil {
+				logger.Error("Failed to parse tshark fields line",
+					zap.String("line", line),
+					zap.Error(err))
+				continue
 			}
+
+			// 保存到数据库
+			if err := gorm.Repo.CreatePacket(packet); err != nil {
+				logger.Error("Failed to save packet", zap.Error(err))
+				continue
+			}
+
+			// 检查缓存中是否有该数据包的详情，如果有则立即更新
+			if cachedContent, exists := getAndRemoveCachedDetail(taskID, packet.FrameNumber); exists {
+				go func(tid, fnum int64, content string) {
+					if err := updatePacketContentWithCompressed(tid, fnum, content); err != nil {
+						logger.Debug("Update cached packet detail failed",
+							zap.Int64("taskID", tid),
+							zap.Int64("frameNumber", fnum),
+							zap.Error(err))
+					}
+				}(taskID, packet.FrameNumber, cachedContent)
+			}
+
+			packetCounter++
 		}
-		session.IsActive = false
-	}
 
-	delete(sessions, sessionID)
+		if err := scanner.Err(); err != nil {
+			logger.Error("Scanner error", zap.Error(err))
+		}
+
+		// 更新进程状态
+		process.Alive = false
+		gorm.Repo.UpdateProcess(&process)
+
+		logger.Info("Tshark parsing completed",
+			zap.Int64("taskID", taskID),
+			zap.Int64("packetCount", packetCounter))
+	}()
+
 	return nil
 }
 
-func readAndParsePackets(session *CaptureSession, wiresharkFilter string) {
-	defer func() {
-		session.IsActive = false
-		if session.Stdout != nil {
-			session.Stdout.Close()
-		}
-	}()
-
-	// tshark -T json 输出的是一个 JSON 数组，需要流式解析
-	decoder := json.NewDecoder(session.Stdout)
-
-	// 读取开始的 [
-	token, err := decoder.Token()
-	if err != nil {
-		log.Printf("Failed to read JSON start: %v", err)
-		return
-	}
-	if delim, ok := token.(json.Delim); !ok || delim != '[' {
-		log.Printf("Expected JSON array start '[', got: %v", token)
-		return
+// parseTsharkFieldsLine 解析 tshark fields 格式的一行输出
+// 格式: frame.number|frame.time_epoch|ip.src|ip.dst|Protocol|Info
+func parseTsharkFieldsLine(line string, taskID int64, packetCount int64, taskGroupID int64) (*gorm.Packet, error) {
+	// 使用 '|' 分割字段
+	fields := strings.Split(line, "|")
+	if len(fields) < 6 {
+		return nil, fmt.Errorf("expected at least 6 fields, got %d", len(fields))
 	}
 
-	// 逐个读取数组中的对象
-	for decoder.More() {
-		var rawPacket json.RawMessage
-		if err := decoder.Decode(&rawPacket); err != nil {
-			log.Printf("Failed to decode packet: %v", err)
-			continue
-		}
+	packet := &gorm.Packet{
+		TaskID: taskID,
+	}
 
-		// 解析数据包字段
-		var packet PacketData
-		if err := parseTsharkJSON(rawPacket, &packet); err != nil {
-			log.Printf("Failed to parse tshark JSON: %v", err)
-			continue
-		}
+	// 分配任务组内唯一编号
+	if taskGroupID > 0 {
+		counter := getOrCreateCounter(taskGroupID)
+		packet.No = counter.Add(1)
+	} else {
+		packet.No = packetCount
+	}
 
-		// 应用 Wireshark 过滤器（简化版本，实际应该在 tshark 命令中应用）
-		if wiresharkFilter != "" && !applyWiresharkFilter(packet, wiresharkFilter) {
-			continue
-		}
+	// 1. Frame Number (已经是数字)
+	if frameNum, err := strconv.ParseInt(fields[0], 10, 64); err == nil {
+		packet.FrameNumber = frameNum
+	}
 
-		// 设置时间戳（如果从 tshark 获取的时间戳为空）
-		if packet.Timestamp == "" {
-			packet.Timestamp = time.Now().Format("2006-01-02 15:04:05.000000")
-		}
-
-		// 通过 PacketBroadcaster 发送到 WebSocket 客户端
-		broadcaster := GetPacketBroadcaster()
-		if err := broadcaster.SendPacketToSession(session.SessionID, packet); err != nil {
-			log.Printf("Failed to send packet to session %s: %v", session.SessionID, err)
+	// 2. Timestamp (epoch 格式，需要转换为纳秒)
+	if timestampStr := fields[1]; timestampStr != "" {
+		if seconds, err := strconv.ParseFloat(timestampStr, 64); err == nil {
+			packet.Timestamp = int64(seconds * 1e9)
 		}
 	}
 
-	if err := decoder.InputOffset(); err != 0 {
-		// 检查是否有错误
-		log.Printf("Decoder finished")
-	}
-}
-
-// parseTsharkJSON 解析 tshark 的 JSON 输出格式
-func parseTsharkJSON(rawPacket json.RawMessage, packet *PacketData) error {
-	// tshark -T json 的输出格式是:
-	// {
-	//   "_index": "packets-2024-01-01",
-	//   "_type": "doc",
-	//   "_score": null,
-	//   "_source": {
-	//     "layers": {
-	//       "frame": {...},
-	//       "eth": {...},
-	//       "ip": {...},
-	//       ...
-	//     }
-	//   }
-	// }
-
-	var tsharkPacket struct {
-		Source struct {
-			Layers map[string]json.RawMessage `json:"layers"`
-		} `json:"_source"`
+	// 3. Source IP/Address
+	packet.Src = fields[2]
+	if packet.Src == "" {
+		packet.Src = "unknown"
 	}
 
-	if err := json.Unmarshal(rawPacket, &tsharkPacket); err != nil {
-		return fmt.Errorf("invalid tshark packet format: %v", err)
+	// 4. Destination IP/Address
+	packet.Dst = fields[3]
+	if packet.Dst == "" {
+		packet.Dst = "unknown"
 	}
 
-	layers := tsharkPacket.Source.Layers
-
-	// 提取基本信息
-	if frameData, ok := layers["frame"]; ok {
-		var frame map[string]interface{}
-		if err := json.Unmarshal(frameData, &frame); err == nil {
-			// 提取帧号
-			if frameNum, ok := frame["frame.number"]; ok {
-				switch v := frameNum.(type) {
-				case float64:
-					packet.Frame = int(v)
-				case string:
-					if num, err := fmt.Sscanf(v, "%d", &packet.Frame); err != nil || num != 1 {
-						// 如果解析失败，保持为0
-						packet.Frame = 0
-					}
-				}
-			}
-			// 提取时间戳
-			if ts, ok := frame["frame.time_epoch"].(string); ok {
-				packet.Timestamp = ts
-			}
-			// 提取长度
-			if length, ok := frame["frame.len"].(float64); ok {
-				packet.Length = int(length)
-			}
-		}
-	}
-
-	// 提取协议信息
-	if ipData, ok := layers["ip"]; ok {
-		var ip map[string]interface{}
-		if err := json.Unmarshal(ipData, &ip); err == nil {
-			src, srcOk := ip["ip.src"].(string)
-			dst, dstOk := ip["ip.dst"].(string)
-			proto, _ := ip["ip.proto"].(string)
-
-			if srcOk && dstOk {
-				packet.Source = src
-				packet.Dest = dst
-
-				// 确定协议名称
-				switch proto {
-				case "6":
-					packet.Protocol = "TCP"
-				case "17":
-					packet.Protocol = "UDP"
-				case "1":
-					packet.Protocol = "ICMP"
-				default:
-					packet.Protocol = "IP"
-				}
-			}
-		}
-	} else if ethData, ok := layers["eth"]; ok {
-		// 如果没有 IP 层，使用以太网层
-		var eth map[string]interface{}
-		if err := json.Unmarshal(ethData, &eth); err == nil {
-			src, srcOk := eth["eth.src"].(string)
-			dst, dstOk := eth["eth.dst"].(string)
-			if srcOk && dstOk {
-				packet.Source = src
-				packet.Dest = dst
-				packet.Protocol = "ETH"
-			}
-		}
-	}
-
-	// 如果还没有设置协议，设置为 UNKNOWN
+	// 5. Protocol
+	packet.Protocol = fields[4]
 	if packet.Protocol == "" {
 		packet.Protocol = "UNKNOWN"
 	}
 
+	// 6. Length
+	if length, err := strconv.ParseInt(fields[5], 10, 64); err == nil {
+		packet.Length = length
+	}
+
+	// 7. Info
+	packet.Info = fields[6]
+
+	return packet, nil
+}
+
+// parsePacketDetails 从 FIFO 读取流量并解析详情，更新到对应 Packet 的 Content 字段
+func parsePacketDetails(taskID int64, fifoPath string, detailFormat string) {
+	logger.Info("Starting packet details parser",
+		zap.Int64("taskID", taskID),
+		zap.String("fifoPath", fifoPath),
+		zap.String("format", detailFormat))
+
+	// 根据 format 选择 tshark 输出格式
+	var cmd *exec.Cmd
+	// 从配置中读取 tshark 路径
+	tsharkPath := config.GetCaptureTsharkPath()
+	if tsharkPath == "" {
+		tsharkPath = "tshark" // 默认使用 PATH 中的 tshark
+	}
+
+	switch strings.ToLower(detailFormat) {
+	case "json":
+		// JSON 格式（适合程序处理）
+		cmd = exec.Command(tsharkPath, "-r", fifoPath, "-T", "json")
+	case "pdml":
+		// PDML 格式（XML 结构，最详细）
+		cmd = exec.Command(tsharkPath, "-r", fifoPath, "-T", "pdml")
+	case "ek":
+		// ElasticSearch JSON 格式
+		cmd = exec.Command(tsharkPath, "-r", fifoPath, "-T", "ek")
+	default:
+		// 默认使用 text 格式（人类可读）
+		cmd = exec.Command(tsharkPath, "-r", fifoPath, "-V")
+	}
+
+	// 获取标准输出
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		logger.Error("Failed to create stdout pipe for details parser",
+			zap.Int64("taskID", taskID),
+			zap.Error(err))
+		return
+	}
+
+	// 启动进程
+	if err := cmd.Start(); err != nil {
+		logger.Error("Failed to start details parser",
+			zap.Int64("taskID", taskID),
+			zap.Error(err))
+		return
+	}
+
+	// 保存 tshark 进程信息
+	process := gorm.Process{
+		TaskID: taskID,
+		Pid:    int64(cmd.Process.Pid),
+		Ppid:   getProcessPpidByProc(int(cmd.Process.Pid)), // 使用方法1：从 /proc 读取
+		// Ppid: getProcessPpidByPs(int(cmd.Process.Pid)),  // 或者方法2：使用 ps 命令
+		Type:    "tshark-detail",
+		Command: cmd.String(),
+		Alive:   true,
+	}
+	gorm.Repo.CreateProcess(&process)
+
+	// 异步读取和保存详情
+	go func() {
+		defer stdout.Close()
+
+		scanner := bufio.NewScanner(stdout)
+		// 增加缓冲区以支持大输出
+		scanner.Buffer(make([]byte, 10*1024*1024), 10*1024*1024)
+
+		packetIndex := int64(0)
+		currentDetail := strings.Builder{}
+
+		for scanner.Scan() {
+			line := scanner.Text()
+
+			// 检测新数据包的开始（根据不同格式）
+			isNewPacket := false
+			switch strings.ToLower(detailFormat) {
+			case "json":
+				if line == "{" || strings.HasPrefix(strings.TrimSpace(line), "{\"_index\"") {
+					isNewPacket = true
+				}
+			case "pdml":
+				if strings.Contains(line, "<packet>") {
+					isNewPacket = true
+				}
+			default:
+				// text 格式通过空行或 "Frame" 开头判断
+				if strings.HasPrefix(line, "Frame ") || (line == "" && currentDetail.Len() > 0) {
+					isNewPacket = true
+				}
+			}
+
+			if isNewPacket && currentDetail.Len() > 0 {
+				// 保存上一个数据包的详情
+				packetIndex++
+				detailContent := currentDetail.String()
+				if err := updatePacketContent(taskID, packetIndex, detailContent); err != nil {
+					logger.Error("Failed to update packet content",
+						zap.Int64("taskID", taskID),
+						zap.Int64("packetIndex", packetIndex),
+						zap.Error(err))
+				}
+				currentDetail.Reset()
+			}
+
+			currentDetail.WriteString(line)
+			currentDetail.WriteString("\n")
+		}
+
+		// 保存最后一个数据包
+		if currentDetail.Len() > 0 {
+			packetIndex++
+			detailContent := currentDetail.String()
+			if err := updatePacketContent(taskID, packetIndex, detailContent); err != nil {
+				logger.Error("Failed to update packet content",
+					zap.Int64("taskID", taskID),
+					zap.Int64("packetIndex", packetIndex),
+					zap.Error(err))
+			}
+		}
+
+		if err := scanner.Err(); err != nil {
+			logger.Error("Details scanner error",
+				zap.Int64("taskID", taskID),
+				zap.Error(err))
+		}
+
+		// 更新进程状态
+		process.Alive = false
+		gorm.Repo.UpdateProcess(&process)
+
+		logger.Info("Packet details parsing completed",
+			zap.Int64("taskID", taskID),
+			zap.Int64("packetCount", packetIndex))
+	}()
+}
+
+// updatePacketContent 更新单个数据包的 Content 字段
+func updatePacketContent(taskID int64, frameNumber int64, content string) error {
+	// 查询对应的 Packet 记录
+	packets, _, err := gorm.Repo.ListPacketsByTaskIDAndFrameNumber(taskID, frameNumber, frameNumber, 1, 1)
+	if err != nil {
+		return fmt.Errorf("failed to query packet: %v", err)
+	}
+
+	// 压缩数据包内容
+	compressedContent, err := utils.CompressString(content)
+	if err != nil {
+		logger.Error("Failed to compress packet content for caching",
+			zap.Int64("taskID", taskID),
+			zap.Int64("frameNumber", frameNumber),
+			zap.Error(err))
+		return fmt.Errorf("failed to compress packet content: %v", err)
+	}
+	if len(packets) == 0 {
+		// 数据包尚未写入，放入缓存等待重试
+		cachePacketDetail(taskID, frameNumber, compressedContent)
+		logger.Debug("Packet not found, cached compressed detail for later update",
+			zap.Int64("taskID", taskID),
+			zap.Int64("frameNumber", frameNumber))
+		return nil // 返回 nil 表示已缓存，不需要报错
+	}
+
+	packet := packets[0]
+	packet.Content = compressedContent
+
+	// 更新数据库
+	if err := gorm.Repo.UpdatePacket(packet); err != nil {
+		return fmt.Errorf("failed to update packet content: %v", err)
+	}
+
 	return nil
 }
 
-// applyWiresharkFilter 简化的 Wireshark 过滤器实现
-func applyWiresharkFilter(packet PacketData, filter string) bool {
-	// 这是一个简化版本，实际应该使用 tshark 的显示过滤器
-	// 这里只做基本的字符串匹配
-	filterLower := strings.ToLower(filter)
+// updatePacketContentWithCompressed 更新单个数据包的 Content 字段（直接使用已压缩的内容）
+func updatePacketContentWithCompressed(taskID int64, frameNumber int64, compressedContent string) error {
+	// 查询对应的 Packet 记录
+	packets, _, err := gorm.Repo.ListPacketsByTaskIDAndFrameNumber(taskID, frameNumber, frameNumber, 1, 1)
+	if err != nil {
+		return fmt.Errorf("failed to query packet: %v", err)
+	}
 
-	if strings.Contains(filterLower, "ip.addr") {
-		// 提取 IP 地址进行匹配
-		parts := strings.Split(filterLower, "==")
-		if len(parts) == 2 {
-			targetIP := strings.TrimSpace(parts[1])
-			if strings.Contains(packet.Source, targetIP) || strings.Contains(packet.Dest, targetIP) {
-				return true
+	if len(packets) == 0 {
+		// 数据包尚未写入，重新缓存等待重试
+		cachePacketDetail(taskID, frameNumber, compressedContent)
+		logger.Debug("Packet not found, re-cached compressed detail for later update",
+			zap.Int64("taskID", taskID),
+			zap.Int64("frameNumber", frameNumber))
+		return nil
+	}
+
+	packet := packets[0]
+	packet.Content = compressedContent
+
+	// 更新数据库
+	if err := gorm.Repo.UpdatePacket(packet); err != nil {
+		return fmt.Errorf("failed to update packet content: %v", err)
+	}
+
+	return nil
+}
+
+// getProcessPpidByProc 方法1：从 /proc 文件系统读取父进程ID（推荐）
+// 优点：快速、可靠、不依赖外部命令
+// 缺点：仅适用于 Linux 系统
+func getProcessPpidByProc(pid int) int64 {
+	statusPath := fmt.Sprintf("/proc/%d/status", pid)
+	content, err := os.ReadFile(statusPath)
+	if err != nil {
+		logger.Debug("Failed to read /proc status",
+			zap.Int("pid", pid),
+			zap.Error(err))
+		return 0
+	}
+
+	// 查找 PPid 行
+	for _, line := range strings.Split(string(content), "\n") {
+		if strings.HasPrefix(line, "PPid:") {
+			ppidStr := strings.TrimSpace(strings.TrimPrefix(line, "PPid:"))
+			if ppid, err := strconv.Atoi(ppidStr); err == nil {
+				return int64(ppid)
 			}
-			return false
+			break
 		}
 	}
 
-	if strings.Contains(filterLower, "tcp.port") {
-		parts := strings.Split(filterLower, "==")
-		if len(parts) == 2 {
-			targetPort := strings.TrimSpace(parts[1])
-			if strings.Contains(packet.Source, ":"+targetPort) || strings.Contains(packet.Dest, ":"+targetPort) {
-				return true
-			}
-			return false
-		}
+	logger.Debug("PPid not found in /proc status", zap.Int("pid", pid))
+	return 0
+}
+
+// getProcessPpidByPs 方法2：使用 ps 命令获取父进程ID
+// 优点：跨平台（Linux、macOS）
+// 缺点：需要执行外部命令，性能稍慢
+func getProcessPpidByPs(pid int) int64 {
+	cmd := exec.Command("ps", "-o", "ppid=", "-p", strconv.Itoa(pid))
+	output, err := cmd.Output()
+	if err != nil {
+		logger.Debug("Failed to execute ps command",
+			zap.Int("pid", pid),
+			zap.Error(err))
+		return 0
 	}
 
-	// 协议过滤
-	if strings.Contains(filterLower, packet.Protocol) {
-		return true
+	ppidStr := strings.TrimSpace(string(output))
+	if ppidStr == "" {
+		logger.Debug("Empty output from ps command", zap.Int("pid", pid))
+		return 0
 	}
 
-	return true // 默认不过滤
+	if ppid, err := strconv.Atoi(ppidStr); err == nil {
+		return int64(ppid)
+	}
+
+	logger.Debug("Failed to parse ppid from ps output",
+		zap.String("output", ppidStr))
+	return 0
+}
+
+func StopCapture(taskGroupId, taskId string) error {
+	// TODO: 实现停止任务的功能
+	return nil
 }

@@ -25,6 +25,12 @@ server:
   # 服务端 WebSocket URL 路径
   url: "/websocket/v1/webshark/event"
 
+# 抓包配置
+capture:
+  tshark: "/usr/bin/tshark"
+  pcap: "./pcaps"
+  fifo: "/tmp/webshark"
+
 # 日志配置
 log:
   level: "debug"                    # 可选：debug, info, warn, error

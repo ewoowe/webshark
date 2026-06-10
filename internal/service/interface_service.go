@@ -12,25 +12,69 @@ type NetworkInterface struct {
 	IP   string `json:"ip"`
 }
 
+// detectRemoteOS 检测远程主机的操作系统类型
+func detectRemoteOS(host, username, password string) (string, error) {
+	cmd := exec.Command("sshpass", "-p", password, "ssh", "-o", "StrictHostKeyChecking=no",
+		fmt.Sprintf("%s@%s", username, host),
+		"uname -s")
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		return "", fmt.Errorf("failed to detect OS: %v, stderr: %s", err, stderr.String())
+	}
+
+	osName := strings.TrimSpace(stdout.String())
+	switch osName {
+	case "Darwin":
+		return "darwin", nil
+	case "Linux":
+		return "linux", nil
+	default:
+		return osName, nil
+	}
+}
+
 // GetRemoteInterfaces 通过 SSH 获取远程主机的网络接口信息
 func GetRemoteInterfaces(host, username, password string) ([]NetworkInterface, error) {
-	// 先尝试使用 ip 命令（Linux），如果失败则使用 ifconfig（macOS/BSD）
-	var interfaces []NetworkInterface
-	var err error
-	
-	// 首先尝试 Linux 的 ip 命令
-	interfaces, err = getInterfacesWithIp(host, username, password)
-	if err == nil && len(interfaces) > 0 {
+	// 1. 先探测远程主机的操作系统类型
+	osType, err := detectRemoteOS(host, username, password)
+	if err != nil {
+		return nil, fmt.Errorf("failed to detect remote OS: %v", err)
+	}
+
+	// 2. 根据操作系统类型选择对应的命令
+	switch osType {
+	case "linux":
+		// Linux 系统使用 ip 命令
+		interfaces, err := getInterfacesWithIp(host, username, password)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get interfaces on Linux: %v", err)
+		}
+		return interfaces, nil
+	case "darwin":
+		// macOS/BSD 系统使用 ifconfig 命令
+		interfaces, err := getInterfacesWithIfconfig(host, username, password)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get interfaces on macOS/BSD: %v", err)
+		}
+		return interfaces, nil
+	default:
+		// 未知系统，尝试两种方法
+		interfaces, err := getInterfacesWithIp(host, username, password)
+		if err == nil && len(interfaces) > 0 {
+			return interfaces, nil
+		}
+
+		interfaces, err = getInterfacesWithIfconfig(host, username, password)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get interfaces (tried both ip and ifconfig): %v", err)
+		}
 		return interfaces, nil
 	}
-	
-	// 如果 ip 命令失败，尝试 macOS/BSD 的 ifconfig 命令
-	interfaces, err = getInterfacesWithIfconfig(host, username, password)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get interfaces (tried both ip and ifconfig): %v", err)
-	}
-	
-	return interfaces, nil
 }
 
 // getInterfacesWithIp 使用 ip 命令获取网卡信息（Linux）
@@ -50,7 +94,7 @@ func getInterfacesWithIp(host, username, password string) ([]NetworkInterface, e
 
 	var interfaces []NetworkInterface
 	lines := strings.Split(stdout.String(), "\n")
-	
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -88,7 +132,7 @@ func getInterfacesWithIfconfig(host, username, password string) ([]NetworkInterf
 
 	var interfaces []NetworkInterface
 	lines := strings.Split(stdout.String(), "\n")
-	
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -102,7 +146,7 @@ func getInterfacesWithIfconfig(host, username, password string) ([]NetworkInterf
 			if len(parts) >= 2 {
 				ip = parts[1]
 			}
-			
+
 			iface := NetworkInterface{
 				Name: name,
 				IP:   ip,
