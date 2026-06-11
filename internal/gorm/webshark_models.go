@@ -84,7 +84,7 @@ type Packet struct {
 	Dst         string `gorm:"column:dst;type:varchar(64);not null;comment:目的地址" json:"dst"`
 	Protocol    string `gorm:"column:protocol;type:varchar(64);not null;comment:协议" json:"protocol"`
 	Length      int64  `gorm:"column:length;type:bigint;not null;comment:数据包长度" json:"length"`
-	Info        string `gorm:"column:info;type:varchar(256);comment:信息" json:"info"`
+	Info        string `gorm:"column:info;type:varchar(1024);comment:信息" json:"info"`
 	Content     string `gorm:"column:content;type:mediumtext;comment:数据包详情(zstd压缩+base64编码)" json:"-"`
 }
 

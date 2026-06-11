@@ -52,4 +52,20 @@ export class ApiService {
     });
     return await response.json();
   }
+
+  /**
+   * 获取数据包详情
+   */
+  static async getPacketDetail(
+    taskId: number,
+    frameNumber: number
+  ): Promise<ApiResponse<{ detail: string }>> {
+    const params = new URLSearchParams({
+      taskId: taskId.toString(),
+      frameNumber: frameNumber.toString(),
+    });
+
+    const response = await fetch(`${API_BASE}/capture/packet/detail?${params}`);
+    return await response.json();
+  }
 }

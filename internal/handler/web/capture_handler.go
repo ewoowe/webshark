@@ -2,6 +2,7 @@ package web
 
 import (
 	"net/http"
+	"strconv"
 	"webshark/internal/entity"
 	"webshark/internal/logger"
 	"webshark/internal/service"
@@ -33,26 +34,67 @@ func StartCapture(c *gin.Context) {
 
 // StopCapture 停止抓包（Gin handler）
 func StopCapture(c *gin.Context) {
-	sessionID := c.Query("session_id")
-	if sessionID == "" {
+	taskGroupId := c.Query("taskGroupId")
+	taskId := c.Query("taskId")
+
+	// 参数验证：至少提供一个
+	if taskGroupId == "" && taskId == "" {
 		c.JSON(http.StatusBadRequest, entity.ApiResponse[any]{
 			Code: entity.Failure,
-			Msg:  "Missing session_id",
+			Msg:  "Missing taskGroupId or taskId",
 		})
 		return
 	}
 
-	err := service.StopCapture("", sessionID)
+	err := service.StopCapture(taskGroupId, taskId)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, entity.ApiResponse[any]{
-			Code: entity.Failure,
-			Msg:  err.Error(),
-		})
+		logger.Error("停止抓包失败",
+			zap.String("taskGroupId", taskGroupId),
+			zap.String("taskId", taskId),
+			zap.Error(err))
+		InternalErrorWithMsg(c, err, "停止抓包失败")
 		return
 	}
 
-	c.JSON(http.StatusOK, entity.ApiResponse[any]{
-		Code: entity.Success,
-		Msg:  "Capture stopped",
-	})
+	SuccessWithMsg(c, nil, "停止抓包成功")
+}
+
+// GetPacketDetail 获取单个数据包的详情
+func GetPacketDetail(c *gin.Context) {
+	// 解析路径参数
+	taskIDStr := c.Query("taskId")
+	frameNumberStr := c.Query("frameNumber")
+
+	if taskIDStr == "" || frameNumberStr == "" {
+		BadRequest(c, "Missing taskId or frameNumber parameter")
+		return
+	}
+
+	// 转换为 int64
+	taskID, err := strconv.ParseInt(taskIDStr, 10, 64)
+	if err != nil {
+		BadRequest(c, "Invalid taskId parameter")
+		return
+	}
+
+	frameNumber, err := strconv.ParseInt(frameNumberStr, 10, 64)
+	if err != nil {
+		BadRequest(c, "Invalid frameNumber parameter")
+		return
+	}
+
+	// 调用服务层获取详情
+	detail, err := service.GetPacketDetail(taskID, frameNumber)
+	if err != nil {
+		logger.Error("获取数据包详情失败",
+			zap.Int64("taskID", taskID),
+			zap.Int64("frameNumber", frameNumber),
+			zap.Error(err))
+		InternalErrorWithMsg(c, err, "获取数据包详情失败")
+		return
+	}
+
+	SuccessWithMsg(c, gin.H{
+		"detail": detail,
+	}, "获取数据包详情成功")
 }

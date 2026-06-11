@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 	"webshark/internal/config"
 )
@@ -42,6 +43,24 @@ func GenerateCapturePaths(taskID int64) (pcapPath, fifoPath string, err error) {
 	fifoPath = filepath.Join(fifoDir, fifoFilename)
 
 	return pcapPath, fifoPath, nil
+}
+
+// CreateFIFO 创建 FIFO 命名管道文件
+// 如果文件已存在，先删除再创建
+func CreateFIFO(fifoPath string) error {
+	// 如果文件已存在，先删除
+	if _, err := os.Stat(fifoPath); err == nil {
+		if err := os.Remove(fifoPath); err != nil {
+			return fmt.Errorf("failed to remove existing fifo %s: %w", fifoPath, err)
+		}
+	}
+
+	// 创建 FIFO（权限：所有者读写，组和其他人只读）
+	if err := syscall.Mkfifo(fifoPath, 0644); err != nil {
+		return fmt.Errorf("failed to create fifo %s: %w", fifoPath, err)
+	}
+
+	return nil
 }
 
 // ensureDirectory 确保目录存在，如果不存在则创建

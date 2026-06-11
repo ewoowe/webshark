@@ -30,6 +30,9 @@ func (s *Server) SetupAPIRoutes() {
 		// 停止抓包
 		api.POST("/capture/stop", web.StopCapture)
 
+		// 获取数据包详情
+		api.GET("/capture/packet/detail", web.GetPacketDetail)
+
 		// Host 管理路由组
 		hosts := api.Group("/hosts")
 		{
