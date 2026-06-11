@@ -342,6 +342,20 @@ func (r *WebSharkRepository) ListPacketsByTaskIDAndFrameNumber(taskID int64, sta
 	return r.packetRepo.ListByCondition(query, args, page, pageSize, "frame_number ASC")
 }
 
+// UpdatePacketContent 更新数据包的 Content 字段（通过 taskID 和 frameNumber 定位）
+// 返回受影响的行数，如果为 0 表示记录不存在
+func (r *WebSharkRepository) UpdatePacketContent(taskID int64, frameNumber int64, content string) (int64, error) {
+	result := r.db.Model(&Packet{}).
+		Where("task_id = ? AND frame_number = ?", taskID, frameNumber).
+		Update("content", content)
+
+	if result.Error != nil {
+		return 0, result.Error
+	}
+
+	return result.RowsAffected, nil
+}
+
 // GetMaxPacketNoByTaskGroupID 获取任务组内最大的包序号
 func (r *WebSharkRepository) GetMaxPacketNoByTaskGroupID(taskGroupID int64) (int64, error) {
 	var maxNo int64

@@ -907,7 +907,8 @@ func parsePacketDetailsViaTail(taskID int64, pcapPath string, detailFormat strin
 			if isNewPacket && currentDetail.Len() > 0 {
 				// 保存上一个数据包的详情
 				packetIndex++
-				savePacketDetail(taskID, detailFormat, packetIndex, currentDetail.String(), currentFrameNumber)
+				s := currentDetail.String()
+				go savePacketDetail(taskID, detailFormat, packetIndex, s, currentFrameNumber)
 				currentDetail.Reset()
 			}
 
@@ -1197,24 +1198,16 @@ func updatePacketContentWithCompressed(taskID int64, frameNumber int64, compress
 
 // savePacketContent 保存数据包详情到数据库（内部辅助函数）
 func savePacketContent(taskID int64, frameNumber int64, compressedContent string) error {
-	// 查询对应的 Packet 记录
-	packets, _, err := gorm.Repo.ListPacketsByTaskIDAndFrameNumber(taskID, frameNumber, frameNumber, 1, 1)
+	// 直接尝试更新，通过 RowsAffected 判断记录是否存在
+	rowsAffected, err := gorm.Repo.UpdatePacketContent(taskID, frameNumber, compressedContent)
 	if err != nil {
-		return fmt.Errorf("failed to query packet: %v", err)
+		return fmt.Errorf("failed to update packet content: %v", err)
 	}
 
-	if len(packets) == 0 {
-		// 数据包尚未写入，放入缓存等待重试
+	// 如果没有更新任何行，说明数据包尚未写入，放入缓存等待重试
+	if rowsAffected == 0 {
 		cachePacketDetail(taskID, frameNumber, compressedContent)
 		return nil // 返回 nil 表示已缓存，不需要报错
-	}
-
-	packet := packets[0]
-	packet.Content = compressedContent
-
-	// 更新数据库
-	if err := gorm.Repo.UpdatePacket(packet); err != nil {
-		return fmt.Errorf("failed to update packet content: %v", err)
 	}
 
 	return nil

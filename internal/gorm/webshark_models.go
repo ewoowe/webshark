@@ -76,9 +76,9 @@ func (TaskGroup) TableName() string {
 // Packet 数据包表
 type Packet struct {
 	ID          int64  `gorm:"primaryKey;autoIncrement;comment:主键ID" json:"id"`
-	TaskID      int64  `gorm:"column:task_id;type:bigint;not null;index:idx_task_id;comment:任务ID" json:"taskId"`
+	TaskID      int64  `gorm:"column:task_id;type:bigint;not null;index:idx_task_id;index:idx_task_frame;comment:任务ID" json:"taskId"`
 	No          int64  `gorm:"column:no;type:bigint;not null;comment:任务组内全局序号" json:"no"`
-	FrameNumber int64  `gorm:"column:frame_number;type:bigint;not null;comment:任务内数据包序号" json:"frameNumber"`
+	FrameNumber int64  `gorm:"column:frame_number;type:bigint;not null;index:idx_frame_number;index:idx_task_frame;comment:任务内数据包序号" json:"frameNumber"`
 	Timestamp   int64  `gorm:"column:timestamp;type:bigint;not null;comment:纳秒级UNIX时间戳" json:"timestamp"`
 	Src         string `gorm:"column:src;type:varchar(64);not null;comment:源地址" json:"src"`
 	Dst         string `gorm:"column:dst;type:varchar(64);not null;comment:目的地址" json:"dst"`
