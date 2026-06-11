@@ -151,7 +151,7 @@ func UpdateTask(req *UpdateTaskRequest) (*gorm.Task, error) {
 		task.TaskName = req.TaskName
 	}
 	if req.Interfaces != nil {
-		task.Interfaces = req.Interfaces
+		task.Interfaces = gorm.StringArray(req.Interfaces)
 	}
 	if req.OnlyCapture != nil {
 		task.OnlyCapture = *req.OnlyCapture

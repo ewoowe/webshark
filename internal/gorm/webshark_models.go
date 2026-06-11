@@ -35,24 +35,24 @@ func (Host) TableName() string {
 
 // Task 抓包任务信息
 type Task struct {
-	ID              int64      `gorm:"primaryKey;autoIncrement;comment:主键ID" json:"id"`
-	TaskName        string     `gorm:"column:task_name;type:varchar(64);not null;index:idx_task_name;comment:任务名称或者任务组名称" json:"taskName"`
-	StreamID        int8       `gorm:"column:stream_id;type:tinyint;default:0;comment:抓包流ID，同一个任务组内唯一" json:"streamId"`
-	HostID          int64      `gorm:"column:host_id;type:bigint;not null;index:idx_host_id;comment:抓包任务使用的主机ID" json:"hostId"`
-	Interfaces      []string   `gorm:"column:interfaces;type:varchar(256);comment:抓包接口列表，为空时则抓取any" json:"interfaces"`
-	OnlyCapture     bool       `gorm:"column:only_capture;type:boolean;default:false;comment:是否只抓包，不解析，如果是那么就没有实时解析内容的展示" json:"onlyCapture"`
-	ParseDetail     bool       `gorm:"column:parse_detail;type:boolean;default:false;comment:是否解析抓包文件详细内容，如果是那么就只有一条条概览信息" json:"parseDetail"`
-	DetailFormat    string     `gorm:"column:detail_format;type:varchar(64);default:json;comment:详细内容格式，normal，json，pdml，ek等" json:"detailFormat"`
-	FilePath        string     `gorm:"column:file_path;type:varchar(256);not null;comment:抓包文件保存路径" json:"filePath"`
-	FifoPath        string     `gorm:"column:detail_fifo;type:varchar(256);comment:抓包流量FIFO文件路径，用于详细解析" json:"detailFifo"`
-	BpfFilter       string     `gorm:"column:bpf_filter;type:varchar(256);comment:BPF过滤条件" json:"bpfFilter"`
-	WiresharkFilter string     `gorm:"column:wireshark_filter;type:varchar(256);comment:Wireshark过滤条件" json:"wiresharkFilter"`
-	FullCommand     string     `gorm:"column:full_command;type:varchar(512);comment:完整的命令行" json:"fullCommand"`
-	CreatedAt       time.Time  `gorm:"column:created_at;type:timestamp;default:CURRENT_TIMESTAMP;comment:任务开始时间" json:"createdAt"`
-	StopAt          *time.Time `gorm:"column:stop_at;type:timestamp;comment:任务停止时间" json:"stopAt"`
-	TaskGroupId     int64      `gorm:"column:task_group_id;type:bigint;comment:任务组ID" json:"taskGroupId"`
-	Status          string     `gorm:"column:status;type:varchar(64);default:running;comment:任务状态，created，running，stopped，failed" json:"status"`
-	Message         string     `gorm:"column:message;type:varchar(256);comment:任务状态下的额外消息" json:"message"`
+	ID              int64       `gorm:"primaryKey;autoIncrement;comment:主键ID" json:"id"`
+	TaskName        string      `gorm:"column:task_name;type:varchar(64);not null;index:idx_task_name;comment:任务名称或者任务组名称" json:"taskName"`
+	StreamID        int8        `gorm:"column:stream_id;type:tinyint;default:0;comment:抓包流ID，同一个任务组内唯一" json:"streamId"`
+	HostID          int64       `gorm:"column:host_id;type:bigint;not null;index:idx_host_id;comment:抓包任务使用的主机ID" json:"hostId"`
+	Interfaces      StringArray `gorm:"column:interfaces;type:varchar(256);serializer:json;comment:抓包接口列表，为空时则抓取any" json:"interfaces"`
+	OnlyCapture     bool        `gorm:"column:only_capture;type:boolean;default:false;comment:是否只抓包，不解析，如果是那么就没有实时解析内容的展示" json:"onlyCapture"`
+	ParseDetail     bool        `gorm:"column:parse_detail;type:boolean;default:false;comment:是否解析抓包文件详细内容，如果是那么就只有一条条概览信息" json:"parseDetail"`
+	DetailFormat    string      `gorm:"column:detail_format;type:varchar(64);default:json;comment:详细内容格式，normal，json，pdml，ek等" json:"detailFormat"`
+	FilePath        string      `gorm:"column:file_path;type:varchar(256);not null;comment:抓包文件保存路径" json:"filePath"`
+	FifoPath        string      `gorm:"column:detail_fifo;type:varchar(256);comment:抓包流量FIFO文件路径，用于详细解析" json:"detailFifo"`
+	BpfFilter       string      `gorm:"column:bpf_filter;type:varchar(256);comment:BPF过滤条件" json:"bpfFilter"`
+	WiresharkFilter string      `gorm:"column:wireshark_filter;type:varchar(256);comment:Wireshark过滤条件" json:"wiresharkFilter"`
+	FullCommand     string      `gorm:"column:full_command;type:varchar(512);comment:完整的命令行" json:"fullCommand"`
+	CreatedAt       time.Time   `gorm:"column:created_at;type:timestamp;default:CURRENT_TIMESTAMP;comment:任务开始时间" json:"createdAt"`
+	StopAt          *time.Time  `gorm:"column:stop_at;type:timestamp;comment:任务停止时间" json:"stopAt"`
+	TaskGroupId     int64       `gorm:"column:task_group_id;type:bigint;comment:任务组ID" json:"taskGroupId"`
+	Status          string      `gorm:"column:status;type:varchar(64);default:running;comment:任务状态，created，running，stopped，failed" json:"status"`
+	Message         string      `gorm:"column:message;type:varchar(1024);comment:任务状态下的额外消息" json:"message"`
 }
 
 // TableName 获取表名
@@ -108,3 +108,6 @@ type Process struct {
 func (Process) TableName() string {
 	return "process"
 }
+
+// StringArray 自定义类型，用于处理 []string 与数据库 JSON 字段的转换
+type StringArray []string

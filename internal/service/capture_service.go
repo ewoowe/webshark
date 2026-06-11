@@ -24,6 +24,7 @@ import (
 
 // packetNoCounter 任务组级别的包序号计数器（使用原子操作保证线程安全）
 var packetNoCounter = struct {
+	// key 为任务组 ID
 	counters map[int64]*atomic.Int64
 	sync.RWMutex
 }{
@@ -297,7 +298,6 @@ func startHostCaptures(taskGroupID int64, taskName string, onlyCapture bool, par
 				zap.String("host", host.IP),
 				zap.Int("streamId", capture.StreamID),
 				zap.Error(err))
-			continue
 		}
 		streamIdMapTask[capture.StreamID] = taskID
 	}
@@ -312,7 +312,7 @@ func startSingleCapture(taskGroupID int64, taskName string, onlyCapture bool, pa
 		TaskName:        taskName,
 		StreamID:        int8(capture.StreamID),
 		HostID:          host.ID,
-		Interfaces:      capture.Interfaces,
+		Interfaces:      gorm.StringArray(capture.Interfaces),
 		OnlyCapture:     onlyCapture,
 		ParseDetail:     parseDetail,
 		DetailFormat:    detailFormat,
@@ -345,6 +345,13 @@ func startSingleCapture(taskGroupID int64, taskName string, onlyCapture bool, pa
 			logger.Error("Failed to create FIFO",
 				zap.String("fifoPath", fifoPath),
 				zap.Error(err))
+			// 更新任务状态为失败
+			task.Status = "failed"
+			task.Message += fmt.Sprintf("Failed to create FIFO: %v; ", err)
+			err := gorm.Repo.UpdateTask(&task)
+			if err != nil {
+				logger.Error("Failed to update task status", zap.Error(err))
+			}
 			return task.ID, fmt.Errorf("failed to create FIFO: %v", err)
 		}
 		logger.Info("FIFO created",
@@ -357,27 +364,26 @@ func startSingleCapture(taskGroupID int64, taskName string, onlyCapture bool, pa
 	task.FifoPath = fifoPath
 	err = gorm.Repo.UpdateTask(&task)
 	if err != nil {
-		return task.ID, fmt.Errorf("failed to update task file paths: %v", err)
+		logger.Error("Failed to update task file paths", zap.Error(err))
+		task.Message += fmt.Sprintf("Failed to update file paths: %v; ", err)
 	}
 
 	// 4. 构建并执行抓包命令
-	cmd, fullCommand, err := buildCaptureCommand(host, capture, pcapPath, fifoPath, onlyCapture, parseDetail, detailFormat)
-	if err != nil {
-		return task.ID, fmt.Errorf("failed to build command: %v", err)
-	}
+	cmd, fullCommand := buildCaptureCommand(host, capture, pcapPath, fifoPath, onlyCapture, parseDetail)
 
 	// 4.1 保存完整命令到数据库
 	task.FullCommand = fullCommand
 	err = gorm.Repo.UpdateTask(&task)
 	if err != nil {
-		logger.Warn("Failed to update task full command", zap.Error(err))
+		logger.Error("Failed to update task full command", zap.Error(err))
+		task.Message += fmt.Sprintf("Failed to update full command: %v; ", err)
 	}
 
 	// 5. 启动进程前先设置stderr和stdout捕获
-	var stderr strings.Builder
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
-		logger.Warn("Failed to create stderr pipe", zap.Error(err))
+		logger.Error("Failed to create stderr pipe", zap.Error(err))
+		task.Message += fmt.Sprintf("Failed to create stderr pipe: %v; ", err)
 	} else {
 		// 启动一个协程读取stderr
 		go func() {
@@ -385,9 +391,16 @@ func startSingleCapture(taskGroupID int64, taskName string, onlyCapture bool, pa
 			for {
 				n, readErr := stderrPipe.Read(buf)
 				if n > 0 {
-					stderr.Write(buf[:n])
+					line := string(buf[:n])
+					// 实时打印 stderr 内容
+					logger.Warn("Capture process stderr output",
+						zap.Int64("taskID", task.ID),
+						zap.String("output", line))
 				}
 				if readErr != nil {
+					if readErr != io.EOF {
+						logger.Warn("Failed to read stderr of sshpass", zap.Error(readErr))
+					}
 					break
 				}
 			}
@@ -399,15 +412,24 @@ func startSingleCapture(taskGroupID int64, taskName string, onlyCapture bool, pa
 	if !onlyCapture {
 		stdout, err = cmd.StdoutPipe()
 		if err != nil {
-			logger.Error("Failed to create stdout pipe", zap.Error(err))
-			return task.ID, fmt.Errorf("failed to create stdout pipe: %v", err)
+			logger.Error("Failed to create stdout pipe for overview", zap.Error(err))
+			task.Status = "failed"
+			task.Message += fmt.Sprintf("Failed to create stdout pipe for overview: %v; ", err)
+			err := gorm.Repo.UpdateTask(&task)
+			if err != nil {
+				logger.Error("Failed to update task status", zap.Error(err))
+			}
+			return task.ID, fmt.Errorf("failed to create stdout pipe for overview: %v", err)
 		}
 	}
 
 	if err := cmd.Start(); err != nil {
 		task.Status = "failed"
-		task.Message = fmt.Sprintf("Failed to start process: %v", err)
-		gorm.Repo.UpdateTask(&task)
+		task.Message += fmt.Sprintf("Failed to start process: %v; ", err)
+		err := gorm.Repo.UpdateTask(&task)
+		if err != nil {
+			logger.Error("Failed to update task status", zap.Error(err))
+		}
 		return task.ID, fmt.Errorf("failed to start process: %v", err)
 	}
 
@@ -426,35 +448,33 @@ func startSingleCapture(taskGroupID int64, taskName string, onlyCapture bool, pa
 		logger.Error("Failed to create process record", zap.Error(err))
 	}
 
-	// 7. 启动协程监控进程状态并传递stderr
-	go monitorProcessStatusWithStderr(task.ID, cmd, &stderr)
+	// 7. 启动协程监控进程状态
+	go monitorProcessStatus(task.ID, cmd, process.ID)
 
 	// 8. 如果需要解析概览，启动协程实时解析输出（传递已获取的stdout）
 	if !onlyCapture {
-		go parseOverviewFromOutput(task.ID, task.TaskGroupId, stdout, parseDetail, detailFormat, fifoPath, pcapPath)
+		go parseOverviewFromOutput(task.ID, task.TaskGroupId, stdout)
 
 		// 如果需要解析详情，同时启动详情解析进程（从 FIFO 读取）
 		if parseDetail {
 			logger.Info("Starting packet details parser from FIFO",
+				zap.Int64("taskGroupID", task.TaskGroupId),
+				zap.String("taskName", taskName),
 				zap.Int64("taskID", task.ID),
-				zap.String("fifoPath", fifoPath))
+				zap.String("fifoPath", fifoPath),
+				zap.String("detailFormat", detailFormat),
+				zap.String("wiresharkFilter", capture.WiresharkFilter))
 			go parsePacketDetails(task.ID, fifoPath, detailFormat, capture.WiresharkFilter)
 		}
 	}
-	logger.Info("Capture started",
+	logger.Info("sshpass process started",
 		zap.Int64("taskId", task.ID),
+		zap.Int64("processId", process.ID),
 		zap.String("host", host.IP),
-		zap.String("pcapPath", pcapPath))
+		zap.String("pcapPath", pcapPath),
+		zap.String("fifoPath", fifoPath))
 
 	return task.ID, nil
-}
-
-// getInterfaceName 获取网卡名称，如果为空则返回 "any"
-func getInterfaceName(interfaces []string) string {
-	if len(interfaces) == 0 {
-		return "any"
-	}
-	return interfaces[0]
 }
 
 // buildCaptureCommand 构建抓包命令
@@ -463,7 +483,7 @@ func getInterfaceName(interfaces []string) string {
 //	sshpass -p 'password' ssh user@host 'tcpdump -i eth0 -U -w - bpf_filter' | \
 //	  tee output.pcap fifo | \
 //	  (如果需要解析: tshark -T json -r - > fifo)
-func buildCaptureCommand(host *gorm.Host, capture HostSingleCapture, pcapPath, fifoPath string, onlyCapture bool, parseDetail bool, detailFormat string) (*exec.Cmd, string, error) {
+func buildCaptureCommand(host *gorm.Host, capture HostSingleCapture, pcapPath, fifoPath string, onlyCapture bool, parseDetail bool) (*exec.Cmd, string) {
 	// 从配置中读取 tshark 路径
 	tsharkPath := config.GetCaptureTsharkPath()
 	if tsharkPath == "" {
@@ -529,89 +549,49 @@ func buildCaptureCommand(host *gorm.Host, capture HostSingleCapture, pcapPath, f
 	}
 
 	// 返回命令和完整命令字符串
-	return cmd, fullCommand, nil
+	return cmd, fullCommand
 }
 
 // monitorProcessStatus 监控进程状态，等待进程结束并更新数据库
-func monitorProcessStatus(taskID int64, cmd *exec.Cmd) {
+func monitorProcessStatus(taskID int64, cmd *exec.Cmd, processID int64) {
 	// 等待命令执行完成
 	err := cmd.Wait()
 
 	// 更新任务状态
 	task, _ := gorm.Repo.GetTaskByID(taskID)
 	if err != nil {
-		task.Status = "stopped"
-		now := time.Now()
-		task.StopAt = &now
-		task.Message = fmt.Sprintf("Process exited: %v", err)
+		task.Message += fmt.Sprintf("Process exited error: %v; ", err)
 	} else {
-		task.Status = "stopped"
-		now := time.Now()
-		task.StopAt = &now
-		task.Message = "Normal exit"
+		task.Message += "Normal exit; "
 	}
-	gorm.Repo.UpdateTask(task)
-
-	// 更新进程状态
-	processes, err := gorm.Repo.ListProcessesByTaskID(taskID)
-	if err == nil && len(processes) > 0 {
-		processes[0].Alive = false
-		gorm.Repo.UpdateProcess(processes[0])
-	}
-
-	logger.Info("Capture process stopped",
-		zap.Int64("taskID", taskID),
-		zap.String("status", task.Status),
-		zap.String("message", task.Message),
-		zap.Duration("duration", time.Since(task.CreatedAt)))
-}
-
-// monitorProcessStatusWithStderr 监控进程状态并捕获stderr输出
-func monitorProcessStatusWithStderr(taskID int64, cmd *exec.Cmd, stderr *strings.Builder) {
-	// 等待命令执行完成
-	err := cmd.Wait()
-
-	// 更新任务状态
-	task, _ := gorm.Repo.GetTaskByID(taskID)
+	err = gorm.Repo.UpdateTask(task)
 	if err != nil {
-		task.Status = "failed"
-		now := time.Now()
-		task.StopAt = &now
-		// 包含stderr输出以便调试
-		errMsg := fmt.Sprintf("Process exited: %v", err)
-		if stderr != nil && stderr.Len() > 0 {
-			errMsg += fmt.Sprintf(", stderr: %s", strings.TrimSpace(stderr.String()))
-		}
-		task.Message = errMsg
-	} else {
-		task.Status = "stopped"
-		now := time.Now()
-		task.StopAt = &now
-		if stderr != nil && stderr.Len() > 0 {
-			task.Message = fmt.Sprintf("Normal exit with warnings: %s", strings.TrimSpace(stderr.String()))
-		} else {
-			task.Message = "Normal exit"
-		}
+		logger.Error("Failed to update task record", zap.Error(err))
 	}
-	gorm.Repo.UpdateTask(task)
 
 	// 更新进程状态
-	processes, listErr := gorm.Repo.ListProcessesByTaskID(taskID)
-	if listErr == nil && len(processes) > 0 {
-		processes[0].Alive = false
-		gorm.Repo.UpdateProcess(processes[0])
+	process, _ := gorm.Repo.GetProcessByID(processID)
+	process.Alive = false
+	err = gorm.Repo.UpdateProcess(process)
+	if err != nil {
+		logger.Error("Failed to update process record", zap.Error(err))
 	}
 
-	logger.Info("Capture process stopped",
+	logger.Info("sshpass process stopped",
 		zap.Int64("taskID", taskID),
-		zap.String("status", task.Status),
-		zap.String("message", task.Message),
-		zap.Duration("duration", time.Since(task.CreatedAt)))
+		zap.Int64("processID", processID),
+		zap.String("taskStatus", task.Status),
+		zap.String("taskMessage", task.Message))
 }
 
 // parseOverviewFromOutput 从进程输出实时解析数据包概览
-func parseOverviewFromOutput(taskID int64, taskGroupID int64, stdout io.ReadCloser, parseDetail bool, detailFormat string, fifoPath string, pcapPath string) {
-	defer stdout.Close()
+func parseOverviewFromOutput(taskID int64, taskGroupID int64, stdout io.ReadCloser) {
+	defer func(stdout io.ReadCloser) {
+		err := stdout.Close()
+		if err != nil {
+			logger.Error("Failed to close stdout", zap.Error(err))
+		}
+	}(stdout)
 
 	// 使用 bufio.Scanner 逐行读取
 	scanner := bufio.NewScanner(stdout)
@@ -661,114 +641,9 @@ func parseOverviewFromOutput(taskID int64, taskGroupID int64, stdout io.ReadClos
 	}
 
 	logger.Info("Overview parsing completed",
+		zap.Int64("taskGroupID", taskGroupID),
 		zap.Int64("taskID", taskID),
 		zap.Int64("packetCount", packetCounter))
-}
-
-// startTsharkParser 启动 tshark 进程解析 pcap 文件并保存 Packet 记录
-func startTsharkParser(taskID int64, taskGroupID int64, pcapPath string, parseDetail bool) error {
-	// 从配置中读取 tshark 路径
-	tsharkPath := config.GetCaptureTsharkPath()
-	if tsharkPath == "" {
-		tsharkPath = "tshark" // 默认使用 PATH 中的 tshark
-	}
-
-	// 构建 tshark 命令，使用 fields 格式输出（更高效）
-	// 输出格式: frame.number|frame.time_epoch|ip.src|ip.dst|Protocol|Info
-	cmd := exec.Command(tsharkPath, "-r", pcapPath,
-		"-T", "fields",
-		"-E", "separator=|",
-		"-e", "frame.number",
-		"-e", "frame.time_epoch",
-		"-e", "ip.src",
-		"-e", "ip.dst",
-		"-e", "_ws.col.Protocol",
-		"-e", "_ws.col.Info",
-	)
-
-	// 获取标准输出
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("failed to create stdout pipe: %v", err)
-	}
-
-	// 启动进程
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start tshark: %v", err)
-	}
-
-	// 保存 tshark 进程信息
-	process := gorm.Process{
-		TaskID: taskID,
-		Pid:    int64(cmd.Process.Pid),
-		Ppid:   getProcessPpidByProc(int(cmd.Process.Pid)), // 使用方法1：从 /proc 读取
-		// Ppid: getProcessPpidByPs(int(cmd.Process.Pid)),  // 或者方法2：使用 ps 命令
-		Type:    "tshark",
-		Command: cmd.String(),
-		Alive:   true,
-	}
-	gorm.Repo.CreateProcess(&process)
-
-	// 异步解析 tshark 输出
-	go func() {
-		defer stdout.Close()
-
-		// 使用 bufio.Scanner 逐行读取
-		scanner := bufio.NewScanner(stdout)
-		// 增加缓冲区大小以支持长行
-		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-
-		packetCounter := int64(0)
-		for scanner.Scan() {
-			line := scanner.Text()
-			if line == "" {
-				continue
-			}
-
-			// 解析单个数据包
-			packet, err := parseTsharkFieldsLine(line, taskID, packetCounter+1, taskGroupID)
-			if err != nil {
-				logger.Error("Failed to parse tshark fields line",
-					zap.String("line", line),
-					zap.Error(err))
-				continue
-			}
-
-			// 保存到数据库
-			if err := gorm.Repo.CreatePacket(packet); err != nil {
-				logger.Error("Failed to save packet", zap.Error(err))
-				continue
-			}
-
-			// 检查缓存中是否有该数据包的详情，如果有则立即更新
-			if cachedContent, exists, _ := getAndRemoveCachedDetail(taskID, packet.FrameNumber); exists {
-				go func(tid, fnum int64, content string) {
-					if err := updatePacketContentWithCompressed(tid, fnum, content); err != nil {
-						logger.Debug("Update cached packet detail failed",
-							zap.Int64("taskID", tid),
-							zap.Int64("frameNumber", fnum),
-							zap.Error(err))
-					}
-				}(taskID, packet.FrameNumber, cachedContent)
-			}
-
-			packetCounter++
-		}
-
-		if err := scanner.Err(); err != nil {
-			logger.Error("Scanner error", zap.Error(err))
-		}
-
-		// 更新进程状态
-		process.Alive = false
-		gorm.Repo.UpdateProcess(&process)
-
-		logger.Info("Tshark parsing completed",
-			zap.Int64("taskID", taskID),
-			zap.Int64("packetCount", packetCounter))
-	}()
-
-	return nil
 }
 
 // parseTsharkFieldsLine 解析 tshark fields 格式的一行输出
@@ -835,15 +710,6 @@ func parseTsharkFieldsLine(line string, taskID int64, packetCount int64, taskGro
 
 // parsePacketDetails 从 FIFO 读取流量并解析详情，更新到对应 Packet 的 Content 字段
 func parsePacketDetails(taskID int64, fifoPath string, detailFormat string, wiresharkFilter string) {
-	logger.Info("Starting packet details parser",
-		zap.Int64("taskID", taskID),
-		zap.String("fifoPath", fifoPath),
-		zap.String("format", detailFormat))
-
-	// 等待一小段时间，确保主命令已经开始向 FIFO 写入数据
-	// 这样可以避免 tshark 在 FIFO 准备好之前就尝试读取并退出
-	time.Sleep(1 * time.Second)
-
 	// 根据 format 选择 tshark 输出格式
 	var cmd *exec.Cmd
 	// 从配置中读取 tshark 路径
@@ -892,6 +758,35 @@ func parsePacketDetails(taskID int64, fifoPath string, detailFormat string, wire
 		return
 	}
 
+	// 获取标准错误（必须在 Start 之前）
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		logger.Error("Failed to create stderr pipe for details parser",
+			zap.Int64("taskID", taskID),
+			zap.Error(err))
+	} else {
+		// 启动一个协程读取stderr
+		go func() {
+			buf := make([]byte, 4096)
+			for {
+				n, readErr := stderrPipe.Read(buf)
+				if n > 0 {
+					line := string(buf[:n])
+					// 实时打印 stderr 内容
+					logger.Warn("Details parser stderr output",
+						zap.Int64("taskID", taskID),
+						zap.String("output", line))
+				}
+				if readErr != nil {
+					if readErr != io.EOF {
+						logger.Warn("Failed to read stderr of tshark-detail", zap.Error(readErr))
+					}
+					break
+				}
+			}
+		}()
+	}
+
 	// 启动进程
 	if err := cmd.Start(); err != nil {
 		logger.Error("Failed to start details parser",
@@ -914,24 +809,36 @@ func parsePacketDetails(taskID int64, fifoPath string, detailFormat string, wire
 		Command: cmd.String(),
 		Alive:   true,
 	}
-	gorm.Repo.CreateProcess(&process)
+	err = gorm.Repo.CreateProcess(&process)
+	if err != nil {
+		logger.Error("Failed to save tshark-detail process",
+			zap.Int64("taskID", taskID),
+			zap.Error(err))
+	}
 
 	// 异步读取和保存详情
 	go func() {
 		// 确保在 goroutine 结束时回收进程状态，避免僵尸进程
 		defer func() {
 			if err := cmd.Wait(); err != nil {
-				logger.Debug("Details parser process exited",
+				logger.Error("Details parser process exited error",
 					zap.Int64("taskID", taskID),
 					zap.Int("pid", cmd.Process.Pid),
 					zap.Error(err))
 			} else {
-				logger.Debug("Details parser process exited normally",
+				logger.Info("Details parser process exited normally",
 					zap.Int64("taskID", taskID),
 					zap.Int("pid", cmd.Process.Pid))
 			}
 		}()
-		defer stdout.Close()
+		defer func(stdout io.ReadCloser) {
+			err := stdout.Close()
+			if err != nil {
+				logger.Error("Failed to close stdout pipe",
+					zap.Int64("taskID", taskID),
+					zap.Error(err))
+			}
+		}(stdout)
 
 		scanner := bufio.NewScanner(stdout)
 		// 增加缓冲区以支持大输出
@@ -978,27 +885,7 @@ func parsePacketDetails(taskID int64, fifoPath string, detailFormat string, wire
 			if isNewPacket && currentDetail.Len() > 0 {
 				// 保存上一个数据包的详情
 				packetIndex++
-				detailContent := currentDetail.String()
-
-				// 确定使用的帧号：优先使用上一个数据包提取的帧号，否则从内容中提取或使用序号
-				frameNumber := currentFrameNumber
-				if frameNumber <= 0 {
-					// 对于 JSON 格式，尝试从完整内容中提取帧号
-					if strings.ToLower(detailFormat) == "json" {
-						frameNumber = extractFrameNumberFromJSON(detailContent)
-					}
-					// 如果还是没提取到，使用序号
-					if frameNumber <= 0 {
-						frameNumber = packetIndex
-					}
-				}
-
-				if err := updatePacketContent(taskID, frameNumber, detailContent); err != nil {
-					logger.Error("Failed to update packet content",
-						zap.Int64("taskID", taskID),
-						zap.Int64("frameNumber", frameNumber),
-						zap.Error(err))
-				}
+				savePacketDetail(taskID, detailFormat, packetIndex, currentDetail.String(), currentFrameNumber)
 				currentDetail.Reset()
 			}
 
@@ -1019,27 +906,7 @@ func parsePacketDetails(taskID int64, fifoPath string, detailFormat string, wire
 		// 保存最后一个数据包
 		if currentDetail.Len() > 0 {
 			packetIndex++
-			detailContent := currentDetail.String()
-
-			// 确定使用的帧号
-			frameNumber := currentFrameNumber
-			if frameNumber <= 0 {
-				// 对于 JSON 格式，尝试从完整内容中提取帧号
-				if strings.ToLower(detailFormat) == "json" {
-					frameNumber = extractFrameNumberFromJSON(detailContent)
-				}
-				// 如果还是没提取到，使用序号
-				if frameNumber <= 0 {
-					frameNumber = packetIndex
-				}
-			}
-
-			if err := updatePacketContent(taskID, frameNumber, detailContent); err != nil {
-				logger.Error("Failed to update packet content",
-					zap.Int64("taskID", taskID),
-					zap.Int64("frameNumber", frameNumber),
-					zap.Error(err))
-			}
+			savePacketDetail(taskID, detailFormat, packetIndex, currentDetail.String(), currentFrameNumber)
 		}
 
 		if err := scanner.Err(); err != nil {
@@ -1050,7 +917,12 @@ func parsePacketDetails(taskID int64, fifoPath string, detailFormat string, wire
 
 		// 更新进程状态
 		process.Alive = false
-		gorm.Repo.UpdateProcess(&process)
+		err := gorm.Repo.UpdateProcess(&process)
+		if err != nil {
+			logger.Error("Failed to update tshark-detail process alive",
+				zap.Int64("taskID", taskID),
+				zap.Error(err))
+		}
 
 		logger.Info("Packet details parsing completed",
 			zap.Int64("taskID", taskID),
@@ -1060,12 +932,6 @@ func parsePacketDetails(taskID int64, fifoPath string, detailFormat string, wire
 
 // updatePacketContent 更新单个数据包的 Content 字段
 func updatePacketContent(taskID int64, frameNumber int64, content string) error {
-	// 查询对应的 Packet 记录
-	packets, _, err := gorm.Repo.ListPacketsByTaskIDAndFrameNumber(taskID, frameNumber, frameNumber, 1, 1)
-	if err != nil {
-		return fmt.Errorf("failed to query packet: %v", err)
-	}
-
 	// 压缩数据包内容
 	compressedContent, err := utils.CompressString(content)
 	if err != nil {
@@ -1075,12 +941,26 @@ func updatePacketContent(taskID int64, frameNumber int64, content string) error 
 			zap.Error(err))
 		return fmt.Errorf("failed to compress packet content: %v", err)
 	}
+
+	return savePacketContent(taskID, frameNumber, compressedContent)
+}
+
+// updatePacketContentWithCompressed 更新单个数据包的 Content 字段（直接使用已压缩的内容）
+func updatePacketContentWithCompressed(taskID int64, frameNumber int64, compressedContent string) error {
+	return savePacketContent(taskID, frameNumber, compressedContent)
+}
+
+// savePacketContent 保存数据包详情到数据库（内部辅助函数）
+func savePacketContent(taskID int64, frameNumber int64, compressedContent string) error {
+	// 查询对应的 Packet 记录
+	packets, _, err := gorm.Repo.ListPacketsByTaskIDAndFrameNumber(taskID, frameNumber, frameNumber, 1, 1)
+	if err != nil {
+		return fmt.Errorf("failed to query packet: %v", err)
+	}
+
 	if len(packets) == 0 {
 		// 数据包尚未写入，放入缓存等待重试
 		cachePacketDetail(taskID, frameNumber, compressedContent)
-		//logger.Debug("Packet not found, cached compressed detail for later update",
-		//	zap.Int64("taskID", taskID),
-		//	zap.Int64("frameNumber", frameNumber))
 		return nil // 返回 nil 表示已缓存，不需要报错
 	}
 
@@ -1095,32 +975,27 @@ func updatePacketContent(taskID int64, frameNumber int64, content string) error 
 	return nil
 }
 
-// updatePacketContentWithCompressed 更新单个数据包的 Content 字段（直接使用已压缩的内容）
-func updatePacketContentWithCompressed(taskID int64, frameNumber int64, compressedContent string) error {
-	// 查询对应的 Packet 记录
-	packets, _, err := gorm.Repo.ListPacketsByTaskIDAndFrameNumber(taskID, frameNumber, frameNumber, 1, 1)
-	if err != nil {
-		return fmt.Errorf("failed to query packet: %v", err)
+// savePacketDetail 保存单个数据包的详情（内部辅助函数）
+func savePacketDetail(taskID int64, detailFormat string, packetIndex int64, detailContent string, currentFrameNumber int64) {
+	// 确定使用的帧号：优先使用当前数据包提取的帧号，否则从内容中提取或使用序号
+	frameNumber := currentFrameNumber
+	if frameNumber <= 0 {
+		// 对于 JSON 格式，尝试从完整内容中提取帧号
+		if strings.ToLower(detailFormat) == "json" {
+			frameNumber = extractFrameNumberFromJSON(detailContent)
+		}
+		// 如果还是没提取到，使用序号
+		if frameNumber <= 0 {
+			frameNumber = packetIndex
+		}
 	}
 
-	if len(packets) == 0 {
-		// 数据包尚未写入，重新缓存等待重试
-		cachePacketDetail(taskID, frameNumber, compressedContent)
-		//logger.Debug("Packet not found, re-cached compressed detail for later update",
-		//	zap.Int64("taskID", taskID),
-		//	zap.Int64("frameNumber", frameNumber))
-		return nil
+	if err := updatePacketContent(taskID, frameNumber, detailContent); err != nil {
+		logger.Error("Failed to update packet content",
+			zap.Int64("taskID", taskID),
+			zap.Int64("frameNumber", frameNumber),
+			zap.Error(err))
 	}
-
-	packet := packets[0]
-	packet.Content = compressedContent
-
-	// 更新数据库
-	if err := gorm.Repo.UpdatePacket(packet); err != nil {
-		return fmt.Errorf("failed to update packet content: %v", err)
-	}
-
-	return nil
 }
 
 // getProcessPpidByProc 方法1：从 /proc 文件系统读取父进程ID（推荐）
@@ -1199,15 +1074,11 @@ func StopCapture(taskGroupId, taskId string) error {
 	}
 
 	// 处理任务组停止
-	if taskGroupId != "" {
-		taskGroupID, err := strconv.ParseInt(taskGroupId, 10, 64)
-		if err != nil {
-			return fmt.Errorf("invalid taskGroupId: %v", err)
-		}
-		return stopTaskGroup(taskGroupID)
+	taskGroupID, err := strconv.ParseInt(taskGroupId, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid taskGroupId: %v", err)
 	}
-
-	return fmt.Errorf("no valid task to stop")
+	return stopTaskGroup(taskGroupID)
 }
 
 // stopSingleTask 停止单个任务
