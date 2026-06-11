@@ -339,24 +339,12 @@ func startSingleCapture(taskGroupID int64, taskName string, onlyCapture bool, pa
 		return task.ID, fmt.Errorf("failed to generate paths: %v", err)
 	}
 
-	// 2.1 如果需要解析详情，先创建 FIFO 文件
+	// 2.1 如果需要解析详情，不再需要创建 FIFO 文件
 	if parseDetail {
-		if err := CreateFIFO(fifoPath); err != nil {
-			logger.Error("Failed to create FIFO",
-				zap.String("fifoPath", fifoPath),
-				zap.Error(err))
-			// 更新任务状态为失败
-			task.Status = "failed"
-			task.Message += fmt.Sprintf("Failed to create FIFO: %v; ", err)
-			err := gorm.Repo.UpdateTask(&task)
-			if err != nil {
-				logger.Error("Failed to update task status", zap.Error(err))
-			}
-			return task.ID, fmt.Errorf("failed to create FIFO: %v", err)
-		}
-		logger.Info("FIFO created",
+		// 不再需要创建 FIFO，直接使用 tail -f 监听 pcap 文件
+		logger.Info("Will use tail -f to monitor pcap file for details parsing",
 			zap.Int64("taskID", task.ID),
-			zap.String("fifoPath", fifoPath))
+			zap.String("pcapPath", pcapPath))
 	}
 
 	// 3. 更新任务的文件路径
@@ -400,6 +388,9 @@ func startSingleCapture(taskGroupID int64, taskName string, onlyCapture bool, pa
 				if readErr != nil {
 					if readErr != io.EOF {
 						logger.Warn("Failed to read stderr of sshpass", zap.Error(readErr))
+					} else {
+						logger.Info("Capture process stderr closed (EOF)",
+							zap.Int64("taskID", task.ID))
 					}
 					break
 				}
@@ -437,8 +428,8 @@ func startSingleCapture(taskGroupID int64, taskName string, onlyCapture bool, pa
 	process := gorm.Process{
 		TaskID: task.ID,
 		Pid:    int64(cmd.Process.Pid),
-		Ppid:   getProcessPpidByProc(int(cmd.Process.Pid)), // 使用方法1：从 /proc 读取
-		// Ppid: getProcessPpidByPs(int(cmd.Process.Pid)),  // 或者方法2：使用 ps 命令
+		//Ppid:   getProcessPpidByProc(int(cmd.Process.Pid)), // 使用方法1：从 /proc 读取
+		Ppid:    getProcessPpidByPs(int(cmd.Process.Pid)), // 或者方法2：使用 ps 命令
 		Type:    "sshpass",
 		Command: cmd.String(),
 		Alive:   true,
@@ -448,31 +439,37 @@ func startSingleCapture(taskGroupID int64, taskName string, onlyCapture bool, pa
 		logger.Error("Failed to create process record", zap.Error(err))
 	}
 
+	logger.Info("Capture command constructed",
+		zap.Int64("taskID", task.ID),
+		zap.String("command", fullCommand))
+
 	// 7. 启动协程监控进程状态
 	go monitorProcessStatus(task.ID, cmd, process.ID)
 
-	// 8. 如果需要解析概览，启动协程实时解析输出（传递已获取的stdout）
+	// 8. 如果需要解析详情，启动详情解析进程（通过 tail -f 监听 pcap 文件）
+	if parseDetail {
+		logger.Info("Starting packet details parser via tail -f",
+			zap.Int64("taskGroupID", task.TaskGroupId),
+			zap.String("taskName", taskName),
+			zap.Int64("taskID", task.ID),
+			zap.String("pcapPath", pcapPath),
+			zap.String("detailFormat", detailFormat),
+			zap.String("wiresharkFilter", capture.WiresharkFilter))
+		// 启动详情解析器，通过 tail -f 监听 pcap 文件
+		go parsePacketDetailsViaTail(task.ID, pcapPath, detailFormat, capture.WiresharkFilter)
+		// 等待一小段时间确保 tail 进程已经启动
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	// 9. 如果需要解析概览，启动协程实时解析输出（传递已获取的stdout）
 	if !onlyCapture {
 		go parseOverviewFromOutput(task.ID, task.TaskGroupId, stdout)
-
-		// 如果需要解析详情，同时启动详情解析进程（从 FIFO 读取）
-		if parseDetail {
-			logger.Info("Starting packet details parser from FIFO",
-				zap.Int64("taskGroupID", task.TaskGroupId),
-				zap.String("taskName", taskName),
-				zap.Int64("taskID", task.ID),
-				zap.String("fifoPath", fifoPath),
-				zap.String("detailFormat", detailFormat),
-				zap.String("wiresharkFilter", capture.WiresharkFilter))
-			go parsePacketDetails(task.ID, fifoPath, detailFormat, capture.WiresharkFilter)
-		}
 	}
 	logger.Info("sshpass process started",
 		zap.Int64("taskId", task.ID),
 		zap.Int64("processId", process.ID),
 		zap.String("host", host.IP),
-		zap.String("pcapPath", pcapPath),
-		zap.String("fifoPath", fifoPath))
+		zap.String("pcapPath", pcapPath))
 
 	return task.ID, nil
 }
@@ -481,8 +478,9 @@ func startSingleCapture(taskGroupID int64, taskName string, onlyCapture bool, pa
 // 命令结构:
 //
 //	sshpass -p 'password' ssh user@host 'tcpdump -i eth0 -U -w - bpf_filter' | \
-//	  tee output.pcap fifo | \
-//	  (如果需要解析: tshark -T json -r - > fifo)
+//	  tee output.pcap | \
+//	  tshark -l -i - [options] (概览解析)
+//	同时: tail -f output.pcap | tshark -l -r - [options] (详情解析)
 func buildCaptureCommand(host *gorm.Host, capture HostSingleCapture, pcapPath, fifoPath string, onlyCapture bool, parseDetail bool) (*exec.Cmd, string) {
 	// 从配置中读取 tshark 路径
 	tsharkPath := config.GetCaptureTsharkPath()
@@ -534,11 +532,11 @@ func buildCaptureCommand(host *gorm.Host, capture HostSingleCapture, pcapPath, f
 		fullCommand = fmt.Sprintf("%s | tee %s | %s -l -i - %s -T fields -E separator='|' -e frame.number -e frame.time_epoch -e ip.src -e ip.dst -e _ws.col.Protocol -e frame.len -e _ws.col.Info",
 			sshCmd, pcapPath, tsharkPath, wiresharkFilterArg)
 	} else {
-		// 解析详情：使用 tee 保存 pcap，同时复制流量到 fifo
-		// ssh ... | tee pcap fifo | tshark -l -i - -Y 'filter' -T fields -E separator='|' -e frame.number -e frame.time_epoch -e ip.src -e ip.dst -e _ws.col.Protocol -e frame.len -e _ws.col.Info
-		// 然后由另一个 tshark 进程读取 fifo
-		fullCommand = fmt.Sprintf("%s | tee %s %s | %s -l -i - %s -T fields -E separator='|' -e frame.number -e frame.time_epoch -e ip.src -e ip.dst -e _ws.col.Protocol -e frame.len -e _ws.col.Info",
-			sshCmd, pcapPath, fifoPath, tsharkPath, wiresharkFilterArg)
+		// 解析详情：使用 tee 保存 pcap，然后通过 tail -f 监听文件并传递给 tshark
+		// ssh ... | tee pcap | tshark -l -i - -Y 'filter' -T fields ...
+		// 同时：tail -f pcap | tshark -l -r - -V (用于详情解析)
+		fullCommand = fmt.Sprintf("%s | tee %s | %s -l -i - %s -T fields -E separator='|' -e frame.number -e frame.time_epoch -e ip.src -e ip.dst -e _ws.col.Protocol -e frame.len -e _ws.col.Info",
+			sshCmd, pcapPath, tsharkPath, wiresharkFilterArg)
 	}
 
 	cmd := exec.Command("bash", "-c", fullCommand)
@@ -554,15 +552,31 @@ func buildCaptureCommand(host *gorm.Host, capture HostSingleCapture, pcapPath, f
 
 // monitorProcessStatus 监控进程状态，等待进程结束并更新数据库
 func monitorProcessStatus(taskID int64, cmd *exec.Cmd, processID int64) {
+	logger.Info("Started monitoring process",
+		zap.Int64("taskID", taskID),
+		zap.Int64("processID", processID),
+		zap.Int("pid", cmd.Process.Pid))
+
 	// 等待命令执行完成
 	err := cmd.Wait()
+
+	logger.Info("Process monitoring completed",
+		zap.Int64("taskID", taskID),
+		zap.Int64("processID", processID),
+		zap.Int("pid", cmd.Process.Pid),
+		zap.Error(err))
 
 	// 更新任务状态
 	task, _ := gorm.Repo.GetTaskByID(taskID)
 	if err != nil {
 		task.Message += fmt.Sprintf("Process exited error: %v; ", err)
+		logger.Warn("Capture process exited with error",
+			zap.Int64("taskID", taskID),
+			zap.Error(err))
 	} else {
 		task.Message += "Normal exit; "
+		logger.Info("Capture process exited normally",
+			zap.Int64("taskID", taskID))
 	}
 	err = gorm.Repo.UpdateTask(task)
 	if err != nil {
@@ -708,7 +722,238 @@ func parseTsharkFieldsLine(line string, taskID int64, packetCount int64, taskGro
 	return packet, nil
 }
 
+// parsePacketDetailsViaTail 通过 tail -f 监听 pcap 文件并解析详情，更新到对应 Packet 的 Content 字段
+func parsePacketDetailsViaTail(taskID int64, pcapPath string, detailFormat string, wiresharkFilter string) {
+	// 从配置中读取 tshark 路径
+	tsharkPath := config.GetCaptureTsharkPath()
+	if tsharkPath == "" {
+		tsharkPath = "tshark" // 默认使用 PATH 中的 tshark
+	}
+
+	// 构建命令: tail -f pcap | tshark -l -r - [options]
+	// 注意：tail -f 会持续输出新写入的数据
+	tailCmd := fmt.Sprintf("tail -f %s", pcapPath)
+
+	// 构建 tshark 命令参数
+	var tsharkArgs []string
+	tsharkArgs = append(tsharkArgs, "-l", "-r", "-") // -l 行缓冲，-r - 从 stdin 读取
+
+	// 添加 Wireshark 过滤器（如果提供）
+	if wiresharkFilter != "" {
+		tsharkArgs = append(tsharkArgs, "-Y", wiresharkFilter)
+	}
+
+	// 根据格式添加输出类型参数
+	switch strings.ToLower(detailFormat) {
+	case "json":
+		tsharkArgs = append(tsharkArgs, "-T", "json")
+	case "pdml":
+		tsharkArgs = append(tsharkArgs, "-T", "pdml")
+	case "ek":
+		tsharkArgs = append(tsharkArgs, "-T", "ek")
+	default:
+		tsharkArgs = append(tsharkArgs, "-V")
+	}
+
+	// 构建完整的管道命令
+	fullCommand := fmt.Sprintf("%s | %s %s", tailCmd, tsharkPath, strings.Join(tsharkArgs, " "))
+
+	cmd := exec.Command("bash", "-c", fullCommand)
+
+	// 设置进程组，以便后续可以一起终止所有子进程
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
+
+	logger.Info("Details parser command constructed",
+		zap.Int64("taskID", taskID),
+		zap.String("command", fullCommand))
+
+	// 获取标准输出
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		logger.Error("Failed to create stdout pipe for details parser",
+			zap.Int64("taskID", taskID),
+			zap.Error(err))
+		return
+	}
+
+	// 获取标准错误（必须在 Start 之前）
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		logger.Error("Failed to create stderr pipe for details parser",
+			zap.Int64("taskID", taskID),
+			zap.Error(err))
+	} else {
+		// 启动一个协程读取stderr
+		go func() {
+			buf := make([]byte, 4096)
+			for {
+				n, readErr := stderrPipe.Read(buf)
+				if n > 0 {
+					line := string(buf[:n])
+					// 实时打印 stderr 内容
+					logger.Warn("Details parser stderr output",
+						zap.Int64("taskID", taskID),
+						zap.String("output", line))
+				}
+				if readErr != nil {
+					if readErr != io.EOF {
+						logger.Warn("Failed to read stderr of tshark-detail", zap.Error(readErr))
+					} else {
+						logger.Info("Details parser stderr closed (EOF)",
+							zap.Int64("taskID", taskID))
+					}
+					break
+				}
+			}
+		}()
+	}
+
+	// 启动进程
+	if err := cmd.Start(); err != nil {
+		logger.Error("Failed to start details parser",
+			zap.Int64("taskID", taskID),
+			zap.Error(err))
+		return
+	}
+
+	logger.Info("Details parser started via tail -f",
+		zap.Int64("taskID", taskID),
+		zap.Int("pid", cmd.Process.Pid),
+		zap.String("pcapPath", pcapPath))
+
+	// 保存 tshark 进程信息
+	process := gorm.Process{
+		TaskID:  taskID,
+		Pid:     int64(cmd.Process.Pid),
+		Ppid:    getProcessPpidByPs(int(cmd.Process.Pid)),
+		Type:    "tshark-detail",
+		Command: cmd.String(),
+		Alive:   true,
+	}
+	err = gorm.Repo.CreateProcess(&process)
+	if err != nil {
+		logger.Error("Failed to save tshark-detail process",
+			zap.Int64("taskID", taskID),
+			zap.Error(err))
+	}
+
+	// 异步读取和保存详情
+	go func() {
+		// 确保在 goroutine 结束时回收进程状态，避免僵尸进程
+		defer func() {
+			if err := cmd.Wait(); err != nil {
+				logger.Error("Details parser process exited error",
+					zap.Int64("taskID", taskID),
+					zap.Int("pid", cmd.Process.Pid),
+					zap.Error(err))
+			} else {
+				logger.Info("Details parser process exited normally",
+					zap.Int64("taskID", taskID),
+					zap.Int("pid", cmd.Process.Pid))
+			}
+		}()
+		defer func(stdout io.ReadCloser) {
+			err := stdout.Close()
+			if err != nil {
+				logger.Error("Failed to close stdout pipe",
+					zap.Int64("taskID", taskID),
+					zap.Error(err))
+			}
+		}(stdout)
+
+		scanner := bufio.NewScanner(stdout)
+		// 增加缓冲区以支持大输出
+		scanner.Buffer(make([]byte, 10*1024*1024), 10*1024*1024)
+
+		packetIndex := int64(0)
+		currentDetail := strings.Builder{}
+		var currentFrameNumber int64 // 当前数据包的帧号
+
+		for scanner.Scan() {
+			line := scanner.Text()
+
+			// 检测新数据包的开始（根据不同格式）
+			isNewPacket := false
+			nextFrameNumber := int64(0) // 新数据包的帧号（将在下一个循环中使用）
+
+			switch strings.ToLower(detailFormat) {
+			case "json":
+				if line == "{" || strings.HasPrefix(strings.TrimSpace(line), "{\"_index\"") {
+					isNewPacket = true
+				}
+			case "pdml":
+				if strings.Contains(line, "<packet>") {
+					isNewPacket = true
+					// PDML 格式：从 <field name="num" value="123"/> 提取帧号
+					if strings.Contains(line, `name="num"`) {
+						if frameNum := extractFrameNumberFromPDML(line); frameNum > 0 {
+							nextFrameNumber = frameNum
+						}
+					}
+				}
+			default:
+				// text 格式通过 "Frame" 开头判断
+				if strings.HasPrefix(line, "Frame ") {
+					isNewPacket = true
+					// Text 格式：从 "Frame 123:" 提取帧号
+					if frameNum := extractFrameNumberFromText(line); frameNum > 0 {
+						nextFrameNumber = frameNum
+					}
+				}
+			}
+
+			if isNewPacket && currentDetail.Len() > 0 {
+				// 保存上一个数据包的详情
+				packetIndex++
+				savePacketDetail(taskID, detailFormat, packetIndex, currentDetail.String(), currentFrameNumber)
+				currentDetail.Reset()
+			}
+
+			// 如果是新数据包，将提取的帧号保存为下一个数据包的帧号
+			if isNewPacket {
+				if nextFrameNumber > 0 {
+					currentFrameNumber = nextFrameNumber
+				} else {
+					// 如果没有从当前行提取到帧号，尝试从后续行提取
+					currentFrameNumber = extractFrameNumberFromLine(line, detailFormat)
+				}
+			}
+
+			currentDetail.WriteString(line)
+			currentDetail.WriteString("\n")
+		}
+
+		// 保存最后一个数据包
+		if currentDetail.Len() > 0 {
+			packetIndex++
+			savePacketDetail(taskID, detailFormat, packetIndex, currentDetail.String(), currentFrameNumber)
+		}
+
+		if err := scanner.Err(); err != nil {
+			logger.Error("Details scanner error",
+				zap.Int64("taskID", taskID),
+				zap.Error(err))
+		}
+
+		// 更新进程状态
+		process.Alive = false
+		err := gorm.Repo.UpdateProcess(&process)
+		if err != nil {
+			logger.Error("Failed to update tshark-detail process alive",
+				zap.Int64("taskID", taskID),
+				zap.Error(err))
+		}
+
+		logger.Info("Packet details parsing completed via tail -f",
+			zap.Int64("taskID", taskID),
+			zap.Int64("packetCount", packetIndex))
+	}()
+}
+
 // parsePacketDetails 从 FIFO 读取流量并解析详情，更新到对应 Packet 的 Content 字段
+// 注意：此函数已被 parsePacketDetailsViaTail 替代，保留用于兼容性
 func parsePacketDetails(taskID int64, fifoPath string, detailFormat string, wiresharkFilter string) {
 	// 根据 format 选择 tshark 输出格式
 	var cmd *exec.Cmd
@@ -719,7 +964,7 @@ func parsePacketDetails(taskID int64, fifoPath string, detailFormat string, wire
 	}
 
 	// 构建 tshark 命令参数
-	args := []string{"-r", fifoPath}
+	args := []string{"-l", "-r", fifoPath} // -l 启用行缓冲，确保实时输出
 
 	// 添加 Wireshark 过滤器（如果提供）
 	if wiresharkFilter != "" {
@@ -803,8 +1048,8 @@ func parsePacketDetails(taskID int64, fifoPath string, detailFormat string, wire
 	process := gorm.Process{
 		TaskID: taskID,
 		Pid:    int64(cmd.Process.Pid),
-		Ppid:   getProcessPpidByProc(int(cmd.Process.Pid)), // 使用方法1：从 /proc 读取
-		// Ppid: getProcessPpidByPs(int(cmd.Process.Pid)),  // 或者方法2：使用 ps 命令
+		//Ppid:   getProcessPpidByProc(int(cmd.Process.Pid)), // 使用方法1：从 /proc 读取
+		Ppid:    getProcessPpidByPs(int(cmd.Process.Pid)), // 或者方法2：使用 ps 命令
 		Type:    "tshark-detail",
 		Command: cmd.String(),
 		Alive:   true,
