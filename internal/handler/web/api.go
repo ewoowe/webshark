@@ -19,13 +19,13 @@ func GetInterfaces(c *gin.Context) {
 
 	host, err := service.GetHostByID(hostId)
 	if err != nil {
-		NotFound(c, err)
+		NotFound(c)
 		return
 	}
 
 	interfaces, err := service.GetRemoteInterfaces(host.IP, host.UserName, host.Password)
 	if err != nil {
-		InternalErrorWithMsg(c, err, "获取远程网卡列表失败")
+		InternalErrorWithMsg(c, nil, "获取远程网卡列表失败")
 		return
 	}
 

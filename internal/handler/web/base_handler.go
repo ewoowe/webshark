@@ -8,11 +8,9 @@ import (
 	"strconv"
 	"strings"
 	"webshark/internal/entity"
-	"webshark/internal/logger"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
-	"go.uber.org/zap"
 )
 
 // Success 返回成功响应
@@ -42,8 +40,7 @@ func BadRequest(c *gin.Context, msg string) {
 }
 
 // InternalError 返回内部错误响应
-func InternalError(c *gin.Context, err error) {
-	logger.Error("服务器内部错误", zap.Error(err))
+func InternalError(c *gin.Context) {
 	c.JSON(http.StatusInternalServerError, entity.ApiResponse[any]{
 		Code: entity.Failure,
 		Msg:  "服务器内部错误",
@@ -51,17 +48,16 @@ func InternalError(c *gin.Context, err error) {
 }
 
 // InternalErrorWithMsg 返回内部错误响应
-func InternalErrorWithMsg(c *gin.Context, err error, msg string) {
-	logger.Error("服务器内部错误", zap.String("msg", msg), zap.Error(err))
+func InternalErrorWithMsg(c *gin.Context, data any, msg string) {
 	c.JSON(http.StatusInternalServerError, entity.ApiResponse[any]{
 		Code: entity.Failure,
+		Data: data,
 		Msg:  msg,
 	})
 }
 
 // NotFound 返回未找到响应
-func NotFound(c *gin.Context, err error) {
-	logger.Error("资源未找到", zap.Error(err))
+func NotFound(c *gin.Context) {
 	c.JSON(http.StatusNotFound, entity.ApiResponse[any]{
 		Code: entity.Failure,
 		Msg:  "接口请求的资源未找到",

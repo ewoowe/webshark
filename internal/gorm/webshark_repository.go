@@ -222,6 +222,25 @@ func (r *WebSharkRepository) UpdateTask(task *Task) error {
 	return r.taskRepo.Update(task)
 }
 
+// UpdateTaskFields 更新任务指定字段
+func (r *WebSharkRepository) UpdateTaskFields(id int64, updates map[string]interface{}) error {
+	return r.taskRepo.UpdateFields(id, updates)
+}
+
+// AppendTaskMessage 追加任务消息（使用 SQL CONCAT 原子追加）
+func (r *WebSharkRepository) AppendTaskMessage(id int64, message string) error {
+	return r.taskRepo.AppendField(id, "message", message)
+}
+
+// UpdateTaskStatusIfNot 条件更新任务状态：仅当当前状态不等于指定状态时更新
+// 返回受影响的行数，可用于判断是否实际执行了更新
+func (r *WebSharkRepository) UpdateTaskStatusIfNot(id int64, notStatus string, newStatus string) (int64, error) {
+	result := r.db.Model(&Task{}).
+		Where("id = ? AND status != ?", id, notStatus).
+		Update("status", newStatus)
+	return result.RowsAffected, result.Error
+}
+
 // UpdateTaskStopTime 更新任务停止时间
 func (r *WebSharkRepository) UpdateTaskStopTime(id int64, stopAt time.Time) error {
 	return r.taskRepo.UpdateField(id, "stop_at", stopAt)
@@ -428,6 +447,16 @@ func (r *WebSharkRepository) GetProcessByPid(pid int64) (*Process, error) {
 // UpdateProcess 更新进程信息
 func (r *WebSharkRepository) UpdateProcess(process *Process) error {
 	return r.processRepo.Update(process)
+}
+
+// UpdateProcessFields 更新进程指定字段
+func (r *WebSharkRepository) UpdateProcessFields(id int64, updates map[string]interface{}) error {
+	return r.processRepo.UpdateFields(id, updates)
+}
+
+// AppendProcessMessage 追加进程消息（使用 SQL CONCAT 原子追加）
+func (r *WebSharkRepository) AppendProcessMessage(id int64, message string) error {
+	return r.processRepo.AppendField(id, "message", message)
 }
 
 // DeleteProcess 删除进程记录

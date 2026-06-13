@@ -43,9 +43,15 @@ func (r *BaseRepository[T]) GetByID(id int64) (*T, error) {
 	return &entity, nil
 }
 
-// Update 更新记录
+// Update 更新记录（使用 Save，会更新所有字段包括零值）
 func (r *BaseRepository[T]) Update(entity *T) error {
 	return r.db.Save(entity).Error
+}
+
+// UpdateFields 更新指定字段（推荐用于部分字段更新）
+func (r *BaseRepository[T]) UpdateFields(id int64, updates map[string]interface{}) error {
+	var entity T
+	return r.db.Model(&entity).Where("id = ?", id).Updates(updates).Error
 }
 
 // Delete 删除记录
@@ -156,6 +162,13 @@ func (r *BaseRepository[T]) ListByCondition(query string, args []interface{}, pa
 func (r *BaseRepository[T]) UpdateField(id int64, field string, value interface{}) error {
 	var entity T
 	return r.db.Model(&entity).Where("id = ?", id).Update(field, value).Error
+}
+
+// AppendField 追加字符串字段内容（使用 SQL CONCAT，原子操作，无竞态条件）
+func (r *BaseRepository[T]) AppendField(id int64, field string, value string) error {
+	var entity T
+	expr := gorm.Expr("CONCAT(COALESCE("+field+", ''), ?)", value)
+	return r.db.Model(&entity).Where("id = ?", id).Update(field, expr).Error
 }
 
 // DeleteByCondition 根据条件删除

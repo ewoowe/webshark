@@ -86,7 +86,6 @@ type LogRotateConfig struct {
 type CaptureConfig struct {
 	TsharkPath string `mapstructure:"tshark"` // tshark 命令路径
 	PcapDir    string `mapstructure:"pcap"`   // PCAP 文件存储目录
-	FifoDir    string `mapstructure:"fifo"`   // FIFO 命名管道目录
 }
 
 // InitConfig 初始化配置
@@ -168,8 +167,7 @@ func setDefaults() {
 	cfg.SetDefault("output.enable_sql_log", false) // SQL 日志默认关闭，避免性能影响
 
 	// 抓包默认配置
-	cfg.SetDefault("capture.pcap", "./pcaps")       // PCAP 文件存储目录
-	cfg.SetDefault("capture.fifo", "/tmp/webshark") // FIFO 命名管道目录
+	cfg.SetDefault("capture.pcap", "./pcaps") // PCAP 文件存储目录
 }
 
 // GetViper 获取 viper 实例（用于高级操作）
@@ -200,23 +198,21 @@ func GetConfig() (*Config, error) {
 // GetCapturePcapDir 获取 PCAP 文件存储目录
 func GetCapturePcapDir() string {
 	if cfg == nil {
-		InitConfig("")
+		_, err := InitConfig("")
+		if err != nil {
+			return "."
+		}
 	}
 	return cfg.GetString("capture.pcap")
-}
-
-// GetCaptureFifoDir 获取 FIFO 命名管道目录
-func GetCaptureFifoDir() string {
-	if cfg == nil {
-		InitConfig("")
-	}
-	return cfg.GetString("capture.fifo")
 }
 
 // GetCaptureTsharkPath 获取 tshark 命令路径
 func GetCaptureTsharkPath() string {
 	if cfg == nil {
-		InitConfig("")
+		_, err := InitConfig("")
+		if err != nil {
+			return "."
+		}
 	}
 	return cfg.GetString("capture.tshark")
 }

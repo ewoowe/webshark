@@ -29,7 +29,6 @@ server:
 capture:
   tshark: "/usr/bin/tshark"
   pcap: "./pcaps"
-  fifo: "/tmp/webshark"
 
 # 日志配置
 log:

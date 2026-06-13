@@ -17,7 +17,7 @@ func CreateTask(c *gin.Context) {
 
 	task, err := service.CreateTask(&req)
 	if err != nil {
-		InternalError(c, err)
+		InternalError(c)
 		return
 	}
 
@@ -33,7 +33,7 @@ func GetTask(c *gin.Context) {
 
 	task, err := service.GetTaskByID(id)
 	if err != nil {
-		NotFound(c, err)
+		NotFound(c)
 		return
 	}
 
@@ -53,7 +53,7 @@ func ListTasks(c *gin.Context) {
 
 	resp, err := service.ListTasks(req)
 	if err != nil {
-		InternalError(c, err)
+		InternalError(c)
 		return
 	}
 
@@ -85,7 +85,7 @@ func ListTasksByHostID(c *gin.Context) {
 
 	resp, err := service.ListTasksByHostID(req)
 	if err != nil {
-		InternalError(c, err)
+		InternalError(c)
 		return
 	}
 
@@ -117,7 +117,7 @@ func ListTasksByTaskGroupID(c *gin.Context) {
 
 	resp, err := service.ListTasksByTaskGroupID(req)
 	if err != nil {
-		InternalError(c, err)
+		InternalError(c)
 		return
 	}
 
@@ -134,7 +134,7 @@ func UpdateTask(c *gin.Context) {
 
 	task, err := service.UpdateTask(&req)
 	if err != nil {
-		InternalError(c, err)
+		InternalError(c)
 		return
 	}
 
@@ -149,7 +149,7 @@ func StopTask(c *gin.Context) {
 	}
 
 	if err := service.StopTask(id); err != nil {
-		InternalError(c, err)
+		InternalError(c)
 		return
 	}
 
@@ -164,7 +164,7 @@ func DeleteTask(c *gin.Context) {
 	}
 
 	if err := service.DeleteTask(id); err != nil {
-		InternalError(c, err)
+		InternalError(c)
 		return
 	}
 

@@ -17,7 +17,7 @@ func CreateHost(c *gin.Context) {
 
 	host, err := service.CreateHost(&req)
 	if err != nil {
-		InternalError(c, err)
+		InternalError(c)
 		return
 	}
 
@@ -33,7 +33,7 @@ func GetHost(c *gin.Context) {
 
 	host, err := service.GetHostByID(id)
 	if err != nil {
-		NotFound(c, err)
+		NotFound(c)
 		return
 	}
 
@@ -53,7 +53,7 @@ func ListHosts(c *gin.Context) {
 
 	resp, err := service.ListHosts(req)
 	if err != nil {
-		InternalError(c, err)
+		InternalError(c)
 		return
 	}
 
@@ -80,7 +80,7 @@ func SearchHosts(c *gin.Context) {
 
 	resp, err := service.SearchHosts(req)
 	if err != nil {
-		InternalError(c, err)
+		InternalError(c)
 		return
 	}
 
@@ -97,7 +97,7 @@ func UpdateHost(c *gin.Context) {
 
 	host, err := service.UpdateHost(&req)
 	if err != nil {
-		InternalError(c, err)
+		InternalError(c)
 		return
 	}
 
@@ -112,7 +112,7 @@ func DeleteHost(c *gin.Context) {
 	}
 
 	if err := service.DeleteHost(id); err != nil {
-		InternalError(c, err)
+		InternalError(c)
 		return
 	}
 

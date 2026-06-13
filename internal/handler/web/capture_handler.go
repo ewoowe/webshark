@@ -1,9 +1,7 @@
 package web
 
 import (
-	"net/http"
 	"strconv"
-	"webshark/internal/entity"
 	"webshark/internal/logger"
 	"webshark/internal/service"
 
@@ -24,12 +22,12 @@ func StartCapture(c *gin.Context) {
 
 	taskInfo, err := service.StartCapture(req)
 	if err != nil {
-		logger.Error("开启抓包失败", zap.Any("CaptureRequest", req), zap.Error(err))
-		InternalErrorWithMsg(c, err, "开启抓包失败")
+		logger.Error("Failed to start capture", zap.Any("CaptureRequest", req), zap.Error(err))
+		InternalErrorWithMsg(c, taskInfo, "Failed to start capture")
 		return
 	}
 
-	SuccessWithMsg(c, taskInfo, "开启抓包成功")
+	SuccessWithMsg(c, taskInfo, "Success start capture")
 }
 
 // StopCapture 停止抓包（Gin handler）
@@ -39,24 +37,20 @@ func StopCapture(c *gin.Context) {
 
 	// 参数验证：至少提供一个
 	if taskGroupId == "" && taskId == "" {
-		c.JSON(http.StatusBadRequest, entity.ApiResponse[any]{
-			Code: entity.Failure,
-			Msg:  "Missing taskGroupId or taskId",
-		})
-		return
+		BadRequest(c, "Missing taskId or taskGroupId parameter")
 	}
 
 	err := service.StopCapture(taskGroupId, taskId)
 	if err != nil {
-		logger.Error("停止抓包失败",
+		logger.Error("Failed stop capture",
 			zap.String("taskGroupId", taskGroupId),
 			zap.String("taskId", taskId),
 			zap.Error(err))
-		InternalErrorWithMsg(c, err, "停止抓包失败")
+		InternalErrorWithMsg(c, nil, "Failed stop capture")
 		return
 	}
 
-	SuccessWithMsg(c, nil, "停止抓包成功")
+	SuccessWithMsg(c, nil, "Success stop capture")
 }
 
 // GetPacketDetail 获取单个数据包的详情
@@ -86,15 +80,13 @@ func GetPacketDetail(c *gin.Context) {
 	// 调用服务层获取详情
 	detail, err := service.GetPacketDetail(taskID, frameNumber)
 	if err != nil {
-		logger.Error("获取数据包详情失败",
+		logger.Error("Failed get packet detail",
 			zap.Int64("taskID", taskID),
 			zap.Int64("frameNumber", frameNumber),
 			zap.Error(err))
-		InternalErrorWithMsg(c, err, "获取数据包详情失败")
+		InternalErrorWithMsg(c, nil, "Failed get packet detail")
 		return
 	}
 
-	SuccessWithMsg(c, gin.H{
-		"detail": detail,
-	}, "获取数据包详情成功")
+	SuccessWithMsg(c, detail, "Success get packet detail")
 }

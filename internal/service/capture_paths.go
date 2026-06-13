@@ -15,19 +15,14 @@ import (
 //
 // 返回:
 //   - pcapPath: PCAP文件完整路径
-//   - fifoPath: FIFO命名管道完整路径
 //   - err: 错误信息
-func GenerateCapturePaths(taskID int64) (pcapPath, fifoPath string, err error) {
+func GenerateCapturePaths(taskID int64) (pcapPath string, err error) {
 	// 获取配置中的目录
 	pcapDir := config.GetCapturePcapDir()
-	fifoDir := config.GetCaptureFifoDir()
 
 	// 确保目录存在
 	if err := ensureDirectory(pcapDir); err != nil {
-		return "", "", fmt.Errorf("failed to create pcap directory: %w", err)
-	}
-	if err := ensureDirectory(fifoDir); err != nil {
-		return "", "", fmt.Errorf("failed to create fifo directory: %w", err)
+		return "", fmt.Errorf("failed to create pcap directory: %w", err)
 	}
 
 	// 生成时间戳
@@ -38,11 +33,7 @@ func GenerateCapturePaths(taskID int64) (pcapPath, fifoPath string, err error) {
 	pcapFilename := fmt.Sprintf("%d_%s.pcap", taskID, timestamp)
 	pcapPath = filepath.Join(pcapDir, pcapFilename)
 
-	// FIFO 文件: {taskID}_{timestamp}.fifo
-	fifoFilename := fmt.Sprintf("%d_%s.fifo", taskID, timestamp)
-	fifoPath = filepath.Join(fifoDir, fifoFilename)
-
-	return pcapPath, fifoPath, nil
+	return pcapPath, nil
 }
 
 // CreateFIFO 创建 FIFO 命名管道文件
