@@ -10,6 +10,21 @@ import type {
 const API_BASE = '/api/v1/webshark';
 const HOSTS_BASE = `${API_BASE}/hosts`;
 
+/**
+ * 安全解析 JSON 响应，处理空响应情况
+ */
+async function safeJson<T>(response: Response): Promise<T> {
+  const text = await response.text();
+  if (!text || text.trim() === '') {
+    throw new Error(`服务器返回空响应 (HTTP ${response.status})`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`服务器返回非 JSON 格式数据: ${text.substring(0, 200)}`);
+  }
+}
+
 export class HostService {
   /**
    * 获取主机列表
@@ -26,7 +41,7 @@ export class HostService {
         'Content-Type': 'application/json',
       },
     });
-    return await response.json();
+    return await safeJson<UnifiedApiResponse<HostListResponse>>(response);
   }
 
   /**
@@ -48,7 +63,7 @@ export class HostService {
         'Content-Type': 'application/json',
       },
     });
-    return await response.json();
+    return await safeJson<UnifiedApiResponse<HostListResponse>>(response);
   }
 
   /**
@@ -61,7 +76,7 @@ export class HostService {
         'Content-Type': 'application/json',
       },
     });
-    return await response.json();
+    return await safeJson<UnifiedApiResponse<Host>>(response);
   }
 
   /**
@@ -75,7 +90,7 @@ export class HostService {
       },
       body: JSON.stringify(host),
     });
-    return await response.json();
+    return await safeJson<UnifiedApiResponse<Host>>(response);
   }
 
   /**
@@ -89,7 +104,7 @@ export class HostService {
       },
       body: JSON.stringify({ id, ...host }),
     });
-    return await response.json();
+    return await safeJson<UnifiedApiResponse<Host>>(response);
   }
 
   /**
@@ -102,6 +117,6 @@ export class HostService {
         'Content-Type': 'application/json',
       },
     });
-    return await response.json();
+    return await safeJson<UnifiedApiResponse<any>>(response);
   }
 }

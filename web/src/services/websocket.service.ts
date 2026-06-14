@@ -9,10 +9,12 @@ export class WebSocketService {
 
   /**
    * 连接 WebSocket
+   * @param taskType 订阅类型（如 capture、taskGroup）
+   * @param id 订阅 ID
    */
-  connect(sessionId: string): void {
+  connect(taskType: string, id: string): void {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/websocket/v1/webshark/event/${sessionId}`;
+    const wsUrl = `${protocol}//${window.location.host}/websocket/v1/webshark/event/${taskType}/${id}`;
 
     this.ws = new WebSocket(wsUrl);
 

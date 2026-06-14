@@ -20,9 +20,10 @@ export default defineConfig({
         target: 'http://localhost:38081',
         changeOrigin: true,
       },
-      '/ws': {
+      '/websocket': {
         target: 'ws://localhost:38081',
         ws: true,
+        changeOrigin: true,
       },
     },
   },

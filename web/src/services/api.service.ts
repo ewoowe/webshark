@@ -3,6 +3,21 @@ import type { ApiResponse } from '@/types';
 
 const API_BASE = '/api/v1/webshark';
 
+/**
+ * 安全解析 JSON 响应，处理空响应情况
+ */
+async function safeJson<T>(response: Response): Promise<T> {
+  const text = await response.text();
+  if (!text || text.trim() === '') {
+    throw new Error(`服务器返回空响应 (HTTP ${response.status})`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`服务器返回非 JSON 格式数据: ${text.substring(0, 200)}`);
+  }
+}
+
 export class ApiService {
   /**
    * 获取网卡列表
@@ -19,7 +34,7 @@ export class ApiService {
     });
 
     const response = await fetch(`${API_BASE}/interfaces?${params}`);
-    return await response.json();
+    return await safeJson<ApiResponse>(response);
   }
 
   /**
@@ -40,7 +55,7 @@ export class ApiService {
       },
       body: JSON.stringify(config),
     });
-    return await response.json();
+    return await safeJson<ApiResponse<string>>(response);
   }
 
   /**
@@ -50,7 +65,7 @@ export class ApiService {
     const response = await fetch(`${API_BASE}/capture/stop?session_id=${sessionId}`, {
       method: 'POST',
     });
-    return await response.json();
+    return await safeJson<ApiResponse>(response);
   }
 
   /**
@@ -66,6 +81,6 @@ export class ApiService {
     });
 
     const response = await fetch(`${API_BASE}/capture/packet/detail?${params}`);
-    return await response.json();
+    return await safeJson<ApiResponse<{ detail: string }>>(response);
   }
 }

@@ -20,11 +20,19 @@
             <!-- 批量操作按钮组 - 用 v-show 保持布局稳定 -->
             <div class="batch-actions" v-show="selectedRows.length > 0">
               <span class="batch-count">已选择 {{ selectedRows.length }} 项</span>
+              <button class="btn btn-primary" @click="addToCaptureHosts">
+                <span class="btn-icon">🎯</span>
+                <span class="btn-text">+抓包主机</span>
+              </button>
               <button class="btn btn-danger" @click="showBatchDeleteConfirm">
                 <span class="btn-icon">🗑️</span>
                 <span class="btn-text">批量删除</span>
               </button>
             </div>
+            <button class="btn btn-success" @click="goToCapture" v-if="captureHostCount > 0">
+              <span class="btn-icon">🚀</span>
+              <span class="btn-text">去抓包 ({{ captureHostCount }})</span>
+            </button>
             <button class="btn btn-primary" @click="showCreateDialog">
               <span class="btn-icon">➕</span>
               <span class="btn-text">新增主机</span>
@@ -260,10 +268,18 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue';
+import { ref, reactive, onMounted, computed } from 'vue';
+import { useRouter } from 'vue-router';
 import type { VxeGridInstance, VxeGridPropTypes } from 'vxe-table';
 import { HostService } from '@/services/host.service';
 import type { Host, CreateHostRequest, UpdateHostRequest } from '@/types';
+import { useCaptureHosts } from '@/composables/useCaptureHosts';
+
+const router = useRouter();
+
+// 抓包主机状态
+const { store: captureStore, addHosts, hostCount } = useCaptureHosts();
+const captureHostCount = computed(() => hostCount());
 
 // 状态管理
 const hosts = ref<Host[]>([]);
@@ -320,19 +336,19 @@ const columns = reactive<VxeGridPropTypes.Columns<Host>>([
     field: 'hostName',
     title: '主机名称',
     minWidth: 120,
-    align: 'left',
+    align: 'center',
   },
   {
     field: 'ip',
     title: 'IP地址',
     minWidth: 120,
-    align: 'left',
+    align: 'center',
   },
   {
     field: 'userName',
     title: '用户名',
     minWidth: 100,
-    align: 'left',
+    align: 'center',
   },
   {
     field: 'os',
@@ -601,6 +617,27 @@ const showBatchDeleteConfirm = () => {
 // 关闭批量删除对话框
 const closeBatchDeleteDialog = () => {
   showBatchDeleteDialog.value = false;
+};
+
+// 添加选中主机到抓包列表
+const addToCaptureHosts = () => {
+  if (selectedRows.value.length === 0) {
+    alert('请先选择要抓包的主机');
+    return;
+  }
+  addHosts(selectedRows.value.map(h => ({
+    id: h.id,
+    hostName: h.hostName,
+    ip: h.ip,
+    userName: h.userName,
+  })));
+  selectedRows.value = [];
+  alert('已添加到抓包列表');
+};
+
+// 跳转到抓包页面
+const goToCapture = () => {
+  router.push('/capture');
 };
 
 // 确认批量删除

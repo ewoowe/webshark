@@ -5,10 +5,17 @@ export interface NetworkInterface {
 }
 
 export interface Packet {
-  frame: number;
-  timestamp: string;
-  source: string;
-  dest: string;
+  id: number;
+  taskId: number;
+  no: number;
+  frameNumber: number;
+  timestamp: number;
+  ethSrc: string;
+  ethDst: string;
+  ip6Src: string;
+  ip6Dst: string;
+  ip4Src: string;
+  ip4Dst: string;
   protocol: string;
   length: number;
   info: string;
@@ -78,4 +85,88 @@ export interface UnifiedApiResponse<T = any> {
 export interface PaginationParams {
   page: number;
   pageSize: number;
+}
+
+// 抓包相关类型
+export interface CaptureHost {
+  id: number;
+  hostName: string;
+  ip: string;
+  userName: string;
+}
+
+export interface CaptureTask {
+  streamId: number;
+  interfaces: string[];
+  bpfFilter: string;
+  wiresharkFilter: string;
+}
+
+export interface HostCaptureConfig {
+  hostId: number;
+  captures: CaptureTask[];
+}
+
+export interface CaptureRequest {
+  taskName: string;
+  onlyCapture: boolean;
+  parseDetail: boolean;
+  detailFormat: string;
+  hostCaptures: HostCaptureConfig[];
+}
+
+export interface TaskInfo {
+  taskGroupId: number;
+  taskIds: Record<number, number>;
+}
+
+// 任务管理相关类型
+export interface Task {
+  id: number;
+  taskName: string;
+  streamId: number;
+  hostId: number;
+  interfaces: string[];
+  onlyCapture: boolean;
+  parseDetail: boolean;
+  detailFormat: string;
+  filePath: string;
+  bpfFilter: string;
+  wiresharkFilter: string;
+  fullCommand: string;
+  createdAt: string;
+  stopAt: string | null;
+  taskGroupId: number;
+  status: string;
+  message: string;
+}
+
+export interface CreateTaskRequest {
+  taskName: string;
+  hostId: number;
+  interfaces?: string[];
+  onlyCapture?: boolean;
+  parseDetail?: boolean;
+  detailFormat?: string;
+  bpfFilter?: string;
+  wiresharkFilter?: string;
+}
+
+export interface UpdateTaskRequest {
+  id: number;
+  taskName?: string;
+  interfaces?: string[];
+  onlyCapture?: boolean;
+  parseDetail?: boolean;
+  detailFormat?: string;
+  bpfFilter?: string;
+  wiresharkFilter?: string;
+}
+
+export interface TaskListResponse {
+  items: Task[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPage: number;
 }
