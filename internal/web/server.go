@@ -101,7 +101,10 @@ func LoggerMiddleware() gin.HandlerFunc {
 // CORSMiddleware CORS 中间件
 func CORSMiddleware() gin.HandlerFunc {
 	return cors.New(cors.Config{
-		AllowOrigins:     []string{"https://app.apifox.com"},
+		AllowOrigins: []string{
+			"https://app.apifox.com",
+			"http://localhost:38080",
+		},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "X-Token"},
 		AllowCredentials: true,

@@ -324,7 +324,7 @@ func startSingleCapture(taskGroupID int64, taskName string, onlyCapture bool, pa
 	// 1. 先创建任务记录（不包含文件路径）
 	task := gorm.Task{
 		TaskName:        taskName,
-		StreamID:        int8(capture.StreamID),
+		StreamID:        capture.StreamID,
 		HostID:          host.ID,
 		Interfaces:      gorm.StringArray(capture.Interfaces),
 		OnlyCapture:     onlyCapture,

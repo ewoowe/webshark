@@ -153,10 +153,10 @@ func (r *WebSharkRepository) ListHosts(page, pageSize int) ([]*Host, int64, erro
 	return r.hostRepo.List(page, pageSize, "created_at DESC")
 }
 
-// SearchHosts 搜索主机（根据 hostname 或 IP）
+// SearchHosts 搜索主机（根据 hostname、IP 或用户名）
 func (r *WebSharkRepository) SearchHosts(keyword string, page, pageSize int) ([]*Host, int64, error) {
-	query := "host_name LIKE ? OR ip LIKE ?"
-	args := []interface{}{"%" + keyword + "%", "%" + keyword + "%"}
+	query := "host_name LIKE ? OR ip LIKE ? OR user_name LIKE ?"
+	args := []interface{}{"%" + keyword + "%", "%" + keyword + "%", "%" + keyword + "%"}
 	return r.hostRepo.ListByCondition(query, args, page, pageSize, "created_at DESC")
 }
 
@@ -204,17 +204,17 @@ func (r *WebSharkRepository) GetTaskByID(id int64) (*Task, error) {
 
 // ListTasks 获取任务列表（支持分页）
 func (r *WebSharkRepository) ListTasks(page, pageSize int) ([]*Task, int64, error) {
-	return r.taskRepo.List(page, pageSize, "created_at DESC")
+	return r.taskRepo.List(page, pageSize, "id DESC")
 }
 
 // ListTasksByHostID 根据主机 ID 获取任务列表
 func (r *WebSharkRepository) ListTasksByHostID(hostID int64, page, pageSize int) ([]*Task, int64, error) {
-	return r.taskRepo.ListByCondition("host_id = ?", []interface{}{hostID}, page, pageSize, "created_at DESC")
+	return r.taskRepo.ListByCondition("host_id = ?", []interface{}{hostID}, page, pageSize, "id DESC")
 }
 
 // ListTasksByTaskGroupID 根据任务组 ID 获取任务列表
 func (r *WebSharkRepository) ListTasksByTaskGroupID(taskGroupID int64, page, pageSize int) ([]*Task, int64, error) {
-	return r.taskRepo.ListByCondition("task_group_id = ?", []interface{}{taskGroupID}, page, pageSize, "created_at DESC")
+	return r.taskRepo.ListByCondition("task_group_id = ?", []interface{}{taskGroupID}, page, pageSize, "id DESC")
 }
 
 // UpdateTask 更新任务信息

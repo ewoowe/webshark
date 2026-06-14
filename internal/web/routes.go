@@ -56,33 +56,43 @@ func (s *Server) SetupAPIRoutes() {
 		}
 
 		// Task 管理路由组
+		tasks := api.Group("/tasks")
+		{
+			tasks.POST("", web.CreateTask)
+			tasks.GET("", web.ListTasks)
+			tasks.GET("/search", web.ListTasksByHostID)
+			tasks.GET("/group", web.ListTasksByTaskGroupID)
+			tasks.GET("/:id", web.GetTask)
+			tasks.PUT("/:id", web.UpdateTask)
+			tasks.POST("/:id/stop", web.StopTask)
+			tasks.DELETE("/:id", web.DeleteTask)
+		}
 
-	}
+		// WebSocket 路由（带 clientID）
+		ws := s.engine.Group("/websocket/:version/webshark")
+		{
+			ws.GET("/event/:ttype/:id", func(c *gin.Context) {
+				taskType := c.Param("ttype")
+				if taskType == "" {
+					web.BadRequest(c, "Missing type parameter")
+					return
+				}
+				id := c.Param("id")
+				if id == "" {
+					web.BadRequest(c, "Missing id parameter")
+					return
+				}
 
-	// WebSocket 路由（带 clientID）
-	ws := s.engine.Group("/websocket/:version/webshark")
-	{
-		ws.GET("/event/:ttype/:id", func(c *gin.Context) {
-			taskType := c.Param("ttype")
-			if taskType == "" {
-				web.BadRequest(c, "Missing type parameter")
-				return
-			}
-			id := c.Param("id")
-			if id == "" {
-				web.BadRequest(c, "Missing id parameter")
-				return
-			}
+				// 获取 WebSocket 服务器
+				wsServer := utils.GetWebSocketServer()
+				if wsServer == nil {
+					web.InternalErrorWithMsg(c, nil, "WebSocket server not initialized")
+					return
+				}
 
-			// 获取 WebSocket 服务器
-			wsServer := utils.GetWebSocketServer()
-			if wsServer == nil {
-				web.InternalErrorWithMsg(c, nil, "WebSocket server not initialized")
-				return
-			}
-
-			// 处理 WebSocket 连接，传递 taskType 和 id
-			wsServer.HandleWebSocket(c.Writer, c.Request, taskType, id)
-		})
+				// 处理 WebSocket 连接，传递 taskType 和 id
+				wsServer.HandleWebSocket(c.Writer, c.Request, taskType, id)
+			})
+		}
 	}
 }

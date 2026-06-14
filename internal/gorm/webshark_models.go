@@ -37,7 +37,7 @@ func (Host) TableName() string {
 type Task struct {
 	ID              int64       `gorm:"primaryKey;autoIncrement;comment:主键ID" json:"id"`
 	TaskName        string      `gorm:"column:task_name;type:varchar(64);not null;index:idx_task_name;comment:任务名称或者任务组名称" json:"taskName"`
-	StreamID        int8        `gorm:"column:stream_id;type:tinyint;default:0;comment:抓包流ID，同一个任务组内唯一" json:"streamId"`
+	StreamID        int         `gorm:"column:stream_id;type:int;default:0;comment:抓包流ID，同一个任务组内唯一" json:"streamId"`
 	HostID          int64       `gorm:"column:host_id;type:bigint;not null;index:idx_host_id;comment:抓包任务使用的主机ID" json:"hostId"`
 	Interfaces      StringArray `gorm:"column:interfaces;type:varchar(256);serializer:json;comment:抓包接口列表，为空时则抓取any" json:"interfaces"`
 	OnlyCapture     bool        `gorm:"column:only_capture;type:boolean;default:false;comment:是否只抓包，不解析，如果是那么就没有实时解析内容的展示" json:"onlyCapture"`

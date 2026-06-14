@@ -38,6 +38,7 @@ func StopCapture(c *gin.Context) {
 	// 参数验证：至少提供一个
 	if taskGroupId == "" && taskId == "" {
 		BadRequest(c, "Missing taskId or taskGroupId parameter")
+		return
 	}
 
 	err := service.StopCapture(taskGroupId, taskId)
