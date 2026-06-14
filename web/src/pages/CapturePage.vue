@@ -119,10 +119,13 @@
 
     <!-- 全局配置和操作 -->
     <div class="card" v-if="store.hosts.length > 0">
-      <div class="card-header">
-        <h3 class="card-title">抓包控制</h3>
+      <div class="card-header collapsible-header" @click="captureControlExpanded = !captureControlExpanded">
+        <h3 class="card-title">
+          <span class="collapse-arrow" :class="{ collapsed: !captureControlExpanded }">▶</span>
+          抓包控制
+        </h3>
       </div>
-      <div class="card-body">
+      <div class="card-body" v-show="captureControlExpanded">
         <div class="global-config">
           <div class="form-row">
             <div class="form-group">
@@ -213,6 +216,13 @@
         </h3>
         <div class="card-actions">
           <span class="badge">{{ packetCount }} 个数据包</span>
+          <button
+            class="btn"
+            :class="autoScroll ? 'btn-primary' : 'btn-secondary'"
+            @click="toggleAutoScroll"
+          >
+            {{ autoScroll ? '✓ 跟随最新' : '跟随最新' }}
+          </button>
           <button class="btn btn-danger" @click="handleStopCapture">
             停止抓包
           </button>
@@ -222,15 +232,6 @@
         </div>
       </div>
       <div class="card-body">
-        <div class="packet-table-toolbar">
-          <button
-            class="btn btn-sm"
-            :class="autoScroll ? 'btn-primary' : 'btn-secondary'"
-            @click="toggleAutoScroll"
-          >
-            {{ autoScroll ? '✓ 跟随最新' : '跟随最新' }}
-          </button>
-        </div>
         <div class="packet-table-container">
           <vxe-grid
             ref="gridRef"
@@ -360,6 +361,7 @@ const loadInterfaces = async (host: { id: number }) => {
 
 // 折叠状态
 const hostListExpanded = ref(true); // "抓包主机"整张卡片
+const captureControlExpanded = ref(true); // "抓包控制"整张卡片
 const hostExpanded = reactive<Record<number, boolean>>({}); // 每台主机的折叠状态
 
 // 切换主机折叠
@@ -965,11 +967,6 @@ onBeforeUnmount(() => {
 }
 
 /* 数据包表格 */
-.packet-table-toolbar {
-  display: flex;
-  justify-content: flex-end;
-  margin-bottom: 8px;
-}
 .packet-table-container {
   border: 1px solid #f0f2f5;
   border-radius: 8px;
@@ -1076,7 +1073,8 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 14px;
   width: 100%;
-  padding: 14px 16px;
+  height: auto;
+  padding: 16px 20px;
   border: 2px solid #e8e8e8;
   border-radius: 8px;
   background: white;

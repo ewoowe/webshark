@@ -288,9 +288,7 @@
           <button class="modal-close" @click="cancelStop">✕</button>
         </div>
         <div class="modal-body">
-          <p class="stop-dialog-text">
-            任务 <strong>{{ stopTargetTask?.taskName }}</strong> (#{{ stopTargetTask?.id }})
-          </p>
+          <p class="stop-dialog-text">请选择停止方式：</p>
           <div class="stop-options">
             <button
               v-if="stopTargetTask?.taskGroupId && stopTargetTask.taskGroupId > 0"
@@ -724,6 +722,10 @@ onMounted(() => {
 .btn-secondary:hover {
   background: #e0e3e8;
 }
+.btn-danger {
+  background: linear-gradient(135deg, #eb3349 0%, #f45c43 100%);
+  color: white;
+}
 
 .btn-icon {
   font-size: 14px;
@@ -1056,24 +1058,26 @@ onMounted(() => {
   width: 480px;
 }
 
+/* 停止弹窗 */
 .stop-dialog-text {
-  margin: 0 0 20px 0;
+  margin: 0 0 16px 0;
   font-size: 14px;
   color: #555;
 }
 .stop-options {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 10px;
 }
 .stop-option-btn {
-  display: flex !important;
+  display: flex;
   align-items: center;
-  gap: 18px;
+  gap: 14px;
   width: 100%;
-  padding: 20px 22px !important;
+  height: auto;
+  padding: 16px 20px;
   border: 2px solid #e8e8e8;
-  border-radius: 10px;
+  border-radius: 8px;
   background: white;
   cursor: pointer;
   text-align: left;
@@ -1085,29 +1089,24 @@ onMounted(() => {
 }
 .stop-option-btn.selected {
   border-color: #4a90d9;
-  background: #e8f0fe;
-  box-shadow: 0 0 0 1px #4a90d9 inset;
+  background: #f0f5ff;
 }
 .stop-option-btn.btn-warning {
-  border-color: #faad14;
-  background: white;
+  border-color: #fa8c16;
 }
 .stop-option-btn.btn-warning.selected {
-  border-color: #faad14;
+  border-color: #fa8c16;
   background: #fff7e6;
-  box-shadow: 0 0 0 1px #faad14 inset;
 }
 .stop-option-icon {
-  font-size: 32px;
+  font-size: 28px;
   flex-shrink: 0;
-  line-height: 1;
 }
 .stop-option-content {
   flex: 1;
-  min-width: 0;
 }
 .stop-option-title {
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
   color: #333;
   margin-bottom: 4px;
