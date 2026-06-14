@@ -393,6 +393,20 @@ func startSingleCapture(taskGroupID int64, taskName string, onlyCapture bool, pa
 		}
 	}
 
+	if rowsAffected, err := gorm.Repo.UpdateTaskStatusIfNot(task.ID, "failed", "running"); err != nil {
+		return task.ID, fmt.Errorf("failed to update task status: %v", err)
+	} else if rowsAffected == 0 {
+		logger.Info("Set Task status to running failed because task was failed",
+			zap.Int64("taskGroupID", task.TaskGroupId),
+			zap.String("taskName", taskName),
+			zap.Int64("taskID", task.ID))
+	} else {
+		logger.Info("Set Task status to running",
+			zap.Int64("taskGroupID", task.TaskGroupId),
+			zap.String("taskName", taskName),
+			zap.Int64("taskID", task.ID))
+	}
+
 	return task.ID, nil
 }
 
@@ -615,7 +629,7 @@ func buildCaptureCommand(host *gorm.Host, capture HostSingleCapture, pcapPath st
 		// 解析详情：使用 tee 保存 pcap，然后通过 tail -f 监听文件并传递给 tshark
 		// ssh ... | tee pcap | tshark -l -i - -Y 'filter' -T fields ...
 		// 同时：tail -f pcap | tshark -l -r - -V (用于详情解析)
-		fullCommand = fmt.Sprintf("%s | tee %s | %s -l -i - %s -T fields -E separator='|' -e frame.number -e frame.time_epoch -e ip.src -e ip.dst -e _ws.col.Protocol -e frame.len -e _ws.col.Info",
+		fullCommand = fmt.Sprintf("%s | tee %s | %s -n -l -i - %s -T fields -E separator='|' -e frame.number -e frame.time_epoch -e eth.src -e eth.dst -e ipv6.src -e ipv6.dst -e ip.src -e ip.dst -e _ws.col.Protocol -e frame.len -e _ws.col.Info",
 			sshCmd, pcapPath, tsharkPath, wiresharkFilterArg)
 	}
 
@@ -640,7 +654,7 @@ func buildTsharkDetailCommand(wiresharkFilter, detailFormat string, pcapPath str
 
 	// 构建 tshark 命令参数
 	var tsharkArgs []string
-	tsharkArgs = append(tsharkArgs, "-l", "-r", "-") // -l 行缓冲，-r - 从 stdin 读取
+	tsharkArgs = append(tsharkArgs, "-n", "-l", "-r", "-") // -l 行缓冲，-r - 从 stdin 读取
 
 	// 添加 Wireshark 过滤器（如果提供）
 	if wiresharkFilter != "" {
@@ -697,7 +711,7 @@ func monitorProcessStatus(taskID int64, cmd *exec.Cmd, processID int64, processT
 		if rowsAffected, err := gorm.Repo.UpdateTaskStatusIfNot(taskID, "stopping", "failed"); err != nil {
 			logger.Error("Failed to update task status conditionally", zap.Int64("taskID", taskID), zap.Error(err))
 		} else if rowsAffected == 0 {
-			logger.Info("Task is stopping, skipped updating status to failed", zap.Int64("taskID", taskID))
+			logger.Info("Task is stopping, skipped updating status to failed", zap.Int64("taskID", taskID), zap.String("processType", processType))
 		}
 		if err := gorm.Repo.AppendTaskMessage(taskID, fmt.Sprintf("%s process exited error: %v; ", processType, err)); err != nil {
 			logger.Error("Failed to append task message", zap.Error(err))
@@ -737,7 +751,7 @@ func monitorProcessStatus(taskID int64, cmd *exec.Cmd, processID int64, processT
 }
 
 // parseOverviewFromOutput 从进程输出实时解析数据包概览
-func parseOverviewFromOutput(taskID int64, taskGroupID int64, stdout io.ReadCloser) {
+func parseOverviewFromOutput(taskID, taskGroupID int64, stdout io.ReadCloser) {
 	defer func(stdout io.ReadCloser) {
 		err := stdout.Close()
 		if err != nil {
@@ -774,17 +788,19 @@ func parseOverviewFromOutput(taskID int64, taskGroupID int64, stdout io.ReadClos
 			continue
 		}
 
+		go utils.GetWebSocketServer().SendPacket(taskID, taskGroupID, packet)
+
 		// 检查缓存中是否有该数据包的详情，如果有则立即更新
-		if cachedContent, exists, _ := getAndRemoveCachedDetail(taskID, packet.FrameNumber); exists {
-			go func(tid, fnum int64, content string) {
-				if err := updatePacketContentWithCompressed(tid, fnum, content); err != nil {
+		go func(tid, fnum int64) {
+			if cachedContent, exists, _ := getAndRemoveCachedDetail(tid, fnum); exists {
+				if err := updatePacketContentWithCompressed(tid, fnum, cachedContent); err != nil {
 					logger.Debug("Update cached packet detail failed",
 						zap.Int64("taskID", tid),
 						zap.Int64("frameNumber", fnum),
 						zap.Error(err))
 				}
-			}(taskID, packet.FrameNumber, cachedContent)
-		}
+			}
+		}(taskID, packet.FrameNumber)
 
 		packetCounter++
 	}
@@ -802,7 +818,7 @@ func parseOverviewFromOutput(taskID int64, taskGroupID int64, stdout io.ReadClos
 }
 
 // parseTsharkFieldsLine 解析 tshark fields 格式的一行输出
-// 格式: frame.number|frame.time_epoch|ip.src|ip.dst|Protocol|Info
+// 格式: frame.number|frame.time_epoch|eth.src|eth.dst|ipv6.src|ipv6.dst|ip.src|ip.dst|Protocol|Len|Info
 func parseTsharkFieldsLine(line string, taskID int64, packetCount int64, taskGroupID int64) (*gorm.Packet, error) {
 	// 使用 '|' 分割字段
 	fields := strings.Split(line, "|")
@@ -835,30 +851,54 @@ func parseTsharkFieldsLine(line string, taskID int64, packetCount int64, taskGro
 	}
 
 	// 3. Source IP/Address
-	packet.Src = fields[2]
-	if packet.Src == "" {
-		packet.Src = "unknown"
+	packet.EthSrc = fields[2]
+	if packet.EthSrc == "" {
+		packet.EthSrc = "unknown"
 	}
 
 	// 4. Destination IP/Address
-	packet.Dst = fields[3]
-	if packet.Dst == "" {
-		packet.Dst = "unknown"
+	packet.EthDst = fields[3]
+	if packet.EthDst == "" {
+		packet.EthDst = "unknown"
+	}
+
+	// 3. Source IP/Address
+	packet.Ip6Src = fields[4]
+	if packet.Ip6Src == "" {
+		packet.Ip6Src = "unknown"
+	}
+
+	// 4. Destination IP/Address
+	packet.Ip6Dst = fields[5]
+	if packet.Ip6Dst == "" {
+		packet.Ip6Dst = "unknown"
+	}
+
+	// 3. Source IP/Address
+	packet.Ip4Src = fields[6]
+	if packet.Ip4Src == "" {
+		packet.Ip4Src = "unknown"
+	}
+
+	// 4. Destination IP/Address
+	packet.Ip4Dst = fields[7]
+	if packet.Ip4Dst == "" {
+		packet.Ip4Dst = "unknown"
 	}
 
 	// 5. Protocol
-	packet.Protocol = fields[4]
+	packet.Protocol = fields[8]
 	if packet.Protocol == "" {
 		packet.Protocol = "UNKNOWN"
 	}
 
 	// 6. Length
-	if length, err := strconv.ParseInt(fields[5], 10, 64); err == nil {
+	if length, err := strconv.ParseInt(fields[9], 10, 64); err == nil {
 		packet.Length = length
 	}
 
 	// 7. Info
-	packet.Info = fields[6]
+	packet.Info = fields[10]
 
 	return packet, nil
 }
@@ -1268,6 +1308,10 @@ func stopSingleTask(taskID int64) error {
 		return nil
 	}
 
+	if err := gorm.Repo.UpdateTaskFields(taskID, map[string]interface{}{"status": "stopping"}); err != nil {
+		return fmt.Errorf("failed to update task status: %v", err)
+	}
+
 	// 3. 获取任务相关的所有进程
 	processes, err := gorm.Repo.ListProcessesByTaskID(taskID)
 	if err != nil {
@@ -1282,12 +1326,18 @@ func stopSingleTask(taskID int64) error {
 		}
 	}
 
+	// 睡眠一秒，等待进程退出
+	time.Sleep(1 * time.Second)
+
 	// 5. 更新任务状态
-	task.Status = "stopped"
-	task.StopAt = new(time.Now())
-	task.Message += "Manually stopped by user"
-	if err := gorm.Repo.UpdateTask(task); err != nil {
+	if err := gorm.Repo.UpdateTaskFields(taskID, map[string]interface{}{
+		"status":  "stopped",
+		"stop_at": time.Now(),
+	}); err != nil {
 		return fmt.Errorf("failed to update task status: %v", err)
+	}
+	if err := gorm.Repo.AppendTaskMessage(taskID, "Manually stopped by user"); err != nil {
+		return fmt.Errorf("failed to update task message: %v", err)
 	}
 
 	// 6. 清空并更新所有缓存的详情（执行最后一次更新）

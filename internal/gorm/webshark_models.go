@@ -79,8 +79,12 @@ type Packet struct {
 	No          int64  `gorm:"column:no;type:bigint;not null;comment:任务组内全局序号" json:"no"`
 	FrameNumber int64  `gorm:"column:frame_number;type:bigint;not null;index:idx_frame_number;index:idx_task_frame;comment:任务内数据包序号" json:"frameNumber"`
 	Timestamp   int64  `gorm:"column:timestamp;type:bigint;not null;comment:纳秒级UNIX时间戳" json:"timestamp"`
-	Src         string `gorm:"column:src;type:varchar(64);not null;comment:源地址" json:"src"`
-	Dst         string `gorm:"column:dst;type:varchar(64);not null;comment:目的地址" json:"dst"`
+	EthSrc      string `gorm:"column:eth_src;type:varchar(64);comment:以太网源地址" json:"etSrc"`
+	EthDst      string `gorm:"column:eth_dst;type:varchar(64);comment:以太网目的地址" json:"ethDst"`
+	Ip6Src      string `gorm:"column:ip6_src;type:varchar(64);comment:IPv6源地址" json:"ip6Src"`
+	Ip6Dst      string `gorm:"column:ip6_dst;type:varchar(64);comment:IPv6目的地址" json:"ip6Dst"`
+	Ip4Src      string `gorm:"column:ip4_src;type:varchar(64);comment:IPv4源地址" json:"ip4Src"`
+	Ip4Dst      string `gorm:"column:ip4_dst;type:varchar(64);comment:IPv4目的地址" json:"ip4Dst"`
 	Protocol    string `gorm:"column:protocol;type:varchar(64);not null;comment:协议" json:"protocol"`
 	Length      int64  `gorm:"column:length;type:bigint;not null;comment:数据包长度" json:"length"`
 	Info        string `gorm:"column:info;type:varchar(1024);comment:信息" json:"info"`

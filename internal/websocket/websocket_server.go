@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
+	"webshark/internal/gorm"
 	"webshark/internal/logger"
 
 	"github.com/gorilla/websocket"
@@ -15,15 +17,16 @@ import (
 
 // WebSocketServer WebSocket 服务端结构
 type WebSocketServer struct {
-	host       string
-	port       int
-	upgrader   websocket.Upgrader
-	clients    map[string]*ClientConnection // 使用 clientId 作为 key
-	clientMu   sync.RWMutex
-	eventChan  chan *WsEventMessage
-	closeChan  chan struct{}
-	wg         sync.WaitGroup // 用于等待服务端所有协程结束
-	dispatcher EventDispatcherInterface
+	host        string
+	port        int
+	upgrader    websocket.Upgrader
+	clients     map[string]*ClientConnection            // 使用 clientId 作为 key
+	subscribers map[string]map[string]*ClientConnection // taskType:taskID -> clientID -> client
+	clientMu    sync.RWMutex
+	eventChan   chan *WsEventMessage
+	closeChan   chan struct{}
+	wg          sync.WaitGroup // 用于等待服务端所有协程结束
+	dispatcher  EventDispatcherInterface
 	// 标记是否已经打印过无客户端连接的警告日志
 	noClientWarningLogged bool
 }
@@ -33,6 +36,8 @@ type ClientConnection struct {
 	conn      *websocket.Conn
 	clientID  string
 	sessionID string
+	taskType  string
+	taskID    string
 	sendChan  chan []byte
 	closeChan chan struct{}
 }
@@ -62,11 +67,12 @@ func WithEventChannelSize(size int) ServerOption {
 // NewWebSocketServer 创建新的 WebSocket 服务端
 func NewWebSocketServer(host string, port int, options ...ServerOption) *WebSocketServer {
 	server := &WebSocketServer{
-		host:      host,
-		port:      port,
-		clients:   make(map[string]*ClientConnection),
-		eventChan: make(chan *WsEventMessage, 256),
-		closeChan: make(chan struct{}),
+		host:        host,
+		port:        port,
+		clients:     make(map[string]*ClientConnection),
+		subscribers: make(map[string]map[string]*ClientConnection),
+		eventChan:   make(chan *WsEventMessage, 256),
+		closeChan:   make(chan struct{}),
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
@@ -97,8 +103,8 @@ func (s *WebSocketServer) Start() {
 	go s.eventHandler()
 }
 
-// HandleWebSocket 处理 WebSocket 连接请求（导出为公开方法）
-func (s *WebSocketServer) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
+// HandleWebSocket 处理 WebSocket 连接请求，使用指定的type和id
+func (s *WebSocketServer) HandleWebSocket(w http.ResponseWriter, r *http.Request, taskType, id string) {
 	// 升级为 WebSocket 连接
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -106,15 +112,17 @@ func (s *WebSocketServer) HandleWebSocket(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// 生成客户端 ID 和 Session ID
-	clientID := generateClientID()
+	// 生成客户端 ID（基于 taskType:id 确保可预测）和 Session ID
 	sessionID := generateSessionID()
+	clientID := fmt.Sprintf("%s:%s:%s", taskType, id, sessionID)
 
 	// 创建客户端连接
 	client := &ClientConnection{
 		conn:      conn,
 		clientID:  clientID,
 		sessionID: sessionID,
+		taskType:  taskType,
+		taskID:    id,
 		sendChan:  make(chan []byte, 256),
 		closeChan: make(chan struct{}),
 	}
@@ -124,44 +132,8 @@ func (s *WebSocketServer) HandleWebSocket(w http.ResponseWriter, r *http.Request
 
 	logger.Info("新客户端连接",
 		zap.String("clientID", clientID),
-		zap.String("sessionID", sessionID),
-		zap.String("remoteAddr", r.RemoteAddr))
-
-	// 发送连接成功事件
-	s.sendConnectedEvent(client)
-
-	// 启动读写协程
-	s.wg.Add(2)
-	go s.readPump(client)
-	go s.writePump(client)
-}
-
-// HandleWebSocketWithClientID 处理 WebSocket 连接请求，使用指定的 clientID
-func (s *WebSocketServer) HandleWebSocketWithClientID(w http.ResponseWriter, r *http.Request, clientID string) {
-	// 升级为 WebSocket 连接
-	conn, err := s.upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		logger.Error("WebSocket 升级失败", zap.Error(err))
-		return
-	}
-
-	// 生成 Session ID
-	sessionID := generateSessionID()
-
-	// 创建客户端连接
-	client := &ClientConnection{
-		conn:      conn,
-		clientID:  clientID,
-		sessionID: sessionID,
-		sendChan:  make(chan []byte, 256),
-		closeChan: make(chan struct{}),
-	}
-
-	// 注册客户端
-	s.registerClient(client)
-
-	logger.Info("新客户端连接（自定义 clientID）",
-		zap.String("clientID", clientID),
+		zap.String("taskType", taskType),
+		zap.String("taskID", id),
 		zap.String("sessionID", sessionID),
 		zap.String("remoteAddr", r.RemoteAddr))
 
@@ -201,13 +173,74 @@ func (s *WebSocketServer) registerClient(client *ClientConnection) {
 
 	// 注册新客户端
 	s.clients[client.clientID] = client
+
+	// 注册到订阅映射
+	if client.taskType != "" && client.taskID != "" {
+		key := s.subscriberKey(client.taskType, client.taskID)
+		if s.subscribers[key] == nil {
+			s.subscribers[key] = make(map[string]*ClientConnection)
+		}
+		s.subscribers[key][client.clientID] = client
+	}
+}
+
+// subscriberKey 生成订阅映射的 key
+func (s *WebSocketServer) subscriberKey(taskType, taskID string) string {
+	return fmt.Sprintf("%s:%s", taskType, taskID)
 }
 
 // unregisterClient 注销客户端
 func (s *WebSocketServer) unregisterClient(client *ClientConnection) {
 	s.clientMu.Lock()
 	defer s.clientMu.Unlock()
+
+	// 从订阅映射中移除
+	if client.taskType != "" && client.taskID != "" {
+		key := s.subscriberKey(client.taskType, client.taskID)
+		if clients, exists := s.subscribers[key]; exists {
+			delete(clients, client.clientID)
+			if len(clients) == 0 {
+				delete(s.subscribers, key)
+			}
+		}
+	}
+
 	delete(s.clients, client.clientID)
+}
+
+// SendPacket 发送Packet到指定 taskType:taskID 的所有订阅客户端
+func (s *WebSocketServer) SendPacket(taskID, taskGroupID int64, packet *gorm.Packet) {
+	s.clientMu.RLock()
+	var key string
+	if taskGroupID > 0 {
+		key = s.subscriberKey("taskGroup", strconv.FormatInt(taskGroupID, 10))
+	} else {
+		key = s.subscriberKey("task", strconv.FormatInt(taskID, 10))
+	}
+	clients, exists := s.subscribers[key]
+	s.clientMu.RUnlock()
+
+	if !exists || len(clients) == 0 {
+		return
+	}
+
+	packetBytes, err := json.Marshal(packet)
+	if err != nil {
+		logger.Error("序列化 Packet 失败", zap.Error(err))
+		return
+	}
+
+	s.clientMu.RLock()
+	defer s.clientMu.RUnlock()
+	for clientID, client := range clients {
+		select {
+		case client.sendChan <- packetBytes:
+		default:
+			logger.Warn("发送消息到订阅客户端失败，通道已满",
+				zap.String("clientID", clientID),
+				zap.String("key", key))
+		}
+	}
 }
 
 // SendToClient 发送消息到指定客户端
