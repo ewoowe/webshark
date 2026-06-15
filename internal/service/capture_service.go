@@ -581,6 +581,43 @@ func startSshpassProcess(taskGroupID, taskID int64, host *gorm.Host, capture Hos
 //	  tee output.pcap | \
 //	  tshark -l -i - [options] (概览解析)
 //	同时: tail -f output.pcap | tshark -l -r - [options] (详情解析)
+//
+// sshpass -p xxx ssh user@127.0.0.1 '                                                                                                           ─╯
+// sudo tcpdump -i en0 -U -w - udp &
+// TPID=$!
+//
+// # 1. 启动时快照：记录完整的父进程链
+// ORIG_CHAIN=$(ps -o ppid= -p $PPID | tr -d " ")
+// CUR=$ORIG_CHAIN
+// while [ -n "$CUR" ] && [ "$CUR" != "1" ] && [ "$CUR" != "0" ]; do
+// NEXT=$(ps -o ppid= -p "$CUR" 2>/dev/null | tr -d " ")
+// [ -z "$NEXT" ] && break
+// ORIG_CHAIN="$ORIG_CHAIN $NEXT"
+// CUR=$NEXT
+// done
+//
+// # 2. 每秒检测父进程链是否发生变化
+// while kill -0 $TPID 2>/dev/null; do
+// NEW_CHAIN=""
+// CUR=$PPID
+// while [ -n "$CUR" ] && [ "$CUR" != "1" ] && [ "$CUR" != "0" ]; do
+// NEXT=$(ps -o ppid= -p "$CUR" 2>/dev/null | tr -d " ")
+// [ -z "$NEXT" ] && break
+// NEW_CHAIN="$NEW_CHAIN $NEXT"
+// CUR=$NEXT
+// done
+//
+// if [ "$NEW_CHAIN" != "$ORIG_CHAIN" ]; then
+// sudo kill $TPID 2>/dev/null
+// break
+// fi
+// sleep 1
+// done
+//
+// # 3. 兜底：如果循环退出但 tcpdump 还活着，也杀掉
+// kill -0 $TPID 2>/dev/null && sudo kill $TPID 2>/dev/null
+// wait $TPID 2>/dev/null
+// ' > 1.pcap
 func buildCaptureCommand(host *gorm.Host, capture HostSingleCapture, pcapPath string, onlyCapture bool) (*exec.Cmd, string) {
 	// 从配置中读取 tshark 路径
 	tsharkPath := config.GetCaptureTsharkPath()
