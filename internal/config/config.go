@@ -84,8 +84,9 @@ type LogRotateConfig struct {
 
 // CaptureConfig 抓包配置
 type CaptureConfig struct {
-	TsharkPath string `mapstructure:"tshark"` // tshark 命令路径
-	PcapDir    string `mapstructure:"pcap"`   // PCAP 文件存储目录
+	TsharkPath                string `mapstructure:"tshark"`               // tshark 命令路径
+	PcapDir                   string `mapstructure:"pcap"`                 // PCAP 文件存储目录
+	DetailFlushTimeoutSeconds int    `mapstructure:"detail_flush_timeout"` // 包详情空闲刷新超时（秒），0 表示使用默认值 10
 }
 
 // InitConfig 初始化配置
@@ -167,7 +168,8 @@ func setDefaults() {
 	cfg.SetDefault("output.enable_sql_log", false) // SQL 日志默认关闭，避免性能影响
 
 	// 抓包默认配置
-	cfg.SetDefault("capture.pcap", "./pcaps") // PCAP 文件存储目录
+	cfg.SetDefault("capture.pcap", "./pcaps")          // PCAP 文件存储目录
+	cfg.SetDefault("capture.detail_flush_timeout", 10) // 包详情空闲刷新超时（秒）
 }
 
 // GetViper 获取 viper 实例（用于高级操作）

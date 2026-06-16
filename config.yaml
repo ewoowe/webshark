@@ -29,6 +29,7 @@ server:
 capture:
   tshark: "/usr/bin/tshark"
   pcap: "./pcaps"
+  detail_flush_timeout: 10           # 包详情输出空闲超时（秒），超过该时间无新数据则自动落库
 
 # 日志配置
 log:

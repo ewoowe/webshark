@@ -1132,65 +1132,103 @@ func parsePacketDetailsFromOutput(taskID int64, taskGroupID int64, detailFormat 
 	// 增加缓冲区以支持大输出
 	scanner.Buffer(make([]byte, 10*1024*1024), 10*1024*1024)
 
+	// 将阻塞式扫描转到独立 goroutine，通过 channel 传递行数据
+	lineChan := make(chan string, 100)
+
+	go func() {
+		for scanner.Scan() {
+			lineChan <- scanner.Text()
+		}
+		close(lineChan)
+	}()
+
+	// 空闲刷新超时配置
+	idleTimeout := 10 * time.Second
+	if globalCfg, err := config.GetConfig(); err == nil && globalCfg.Capture.DetailFlushTimeoutSeconds > 0 {
+		idleTimeout = time.Duration(globalCfg.Capture.DetailFlushTimeoutSeconds) * time.Second
+	}
+	idleTimer := time.NewTimer(idleTimeout)
+	defer idleTimer.Stop()
+
 	packetIndex := int64(0)
 	currentDetail := strings.Builder{}
 	var currentFrameNumber int64 // 当前数据包的帧号
 
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		// 检测新数据包的开始（根据不同格式）
-		isNewPacket := false
-		nextFrameNumber := int64(0) // 新数据包的帧号（将在下一个循环中使用）
-
-		switch strings.ToLower(detailFormat) {
-		case "json":
-			if line == "{" || strings.HasPrefix(strings.TrimSpace(line), "{\"_index\"") {
-				isNewPacket = true
+	for {
+		select {
+		case line, ok := <-lineChan:
+			if !ok {
+				// scanner 完成（stdout 关闭），刷新剩余数据后退出
+				goto flushAndExit
 			}
-		case "pdml":
-			if strings.Contains(line, "<packet>") {
-				isNewPacket = true
-				// PDML 格式：从 <field name="num" value="123"/> 提取帧号
-				if strings.Contains(line, `name="num"`) {
-					if frameNum := extractFrameNumberFromPDML(line); frameNum > 0 {
+
+			// 检测新数据包的开始（根据不同格式）
+			isNewPacket := false
+			nextFrameNumber := int64(0) // 新数据包的帧号（将在下一个循环中使用）
+
+			switch strings.ToLower(detailFormat) {
+			case "json":
+				if line == "{" || strings.HasPrefix(strings.TrimSpace(line), "{\"_index\"") {
+					isNewPacket = true
+				}
+			case "pdml":
+				if strings.Contains(line, "<packet>") {
+					isNewPacket = true
+					// PDML 格式：从 <field name="num" value="123"/> 提取帧号
+					if strings.Contains(line, `name="num"`) {
+						if frameNum := extractFrameNumberFromPDML(line); frameNum > 0 {
+							nextFrameNumber = frameNum
+						}
+					}
+				}
+			default:
+				// text 格式通过 "Frame" 开头判断
+				if strings.HasPrefix(line, "Frame ") {
+					isNewPacket = true
+					// Text 格式：从 "Frame 123:" 提取帧号
+					if frameNum := extractFrameNumberFromText(line); frameNum > 0 {
 						nextFrameNumber = frameNum
 					}
 				}
 			}
-		default:
-			// text 格式通过 "Frame" 开头判断
-			if strings.HasPrefix(line, "Frame ") {
-				isNewPacket = true
-				// Text 格式：从 "Frame 123:" 提取帧号
-				if frameNum := extractFrameNumberFromText(line); frameNum > 0 {
-					nextFrameNumber = frameNum
+
+			if isNewPacket && currentDetail.Len() > 0 {
+				// 保存上一个数据包的详情
+				packetIndex++
+				s := currentDetail.String()
+				go savePacketDetail(taskID, detailFormat, packetIndex, s, currentFrameNumber)
+				currentDetail.Reset()
+			}
+
+			// 如果是新数据包，将提取的帧号保存为下一个数据包的帧号
+			if isNewPacket {
+				if nextFrameNumber > 0 {
+					currentFrameNumber = nextFrameNumber
+				} else {
+					// 如果没有从当前行提取到帧号，尝试从后续行提取
+					currentFrameNumber = extractFrameNumberFromLine(line, detailFormat)
 				}
 			}
-		}
 
-		if isNewPacket && currentDetail.Len() > 0 {
-			// 保存上一个数据包的详情
-			packetIndex++
-			s := currentDetail.String()
-			go savePacketDetail(taskID, detailFormat, packetIndex, s, currentFrameNumber)
-			currentDetail.Reset()
-		}
+			currentDetail.WriteString(line)
+			currentDetail.WriteString("\n")
 
-		// 如果是新数据包，将提取的帧号保存为下一个数据包的帧号
-		if isNewPacket {
-			if nextFrameNumber > 0 {
-				currentFrameNumber = nextFrameNumber
-			} else {
-				// 如果没有从当前行提取到帧号，尝试从后续行提取
-				currentFrameNumber = extractFrameNumberFromLine(line, detailFormat)
+			// 有数据到达，重置空闲计时器
+			resetTimer(idleTimer, idleTimeout)
+
+		case <-idleTimer.C:
+			// 空闲超时：将当前缓存的数据包落库，避免长时间等待下一包导致数据滞留
+			if currentDetail.Len() > 0 {
+				packetIndex++
+				s := currentDetail.String()
+				go savePacketDetail(taskID, detailFormat, packetIndex, s, currentFrameNumber)
+				currentDetail.Reset()
 			}
+			idleTimer.Reset(idleTimeout)
 		}
-
-		currentDetail.WriteString(line)
-		currentDetail.WriteString("\n")
 	}
 
+flushAndExit:
 	// 保存最后一个数据包
 	if currentDetail.Len() > 0 {
 		packetIndex++
@@ -1207,6 +1245,17 @@ func parsePacketDetailsFromOutput(taskID int64, taskGroupID int64, detailFormat 
 		zap.Int64("taskGroupID", taskGroupID),
 		zap.Int64("taskID", taskID),
 		zap.Int64("packetCount", packetIndex))
+}
+
+// resetTimer 安全重置计时器，先排空 channel 再 Reset，避免旧事件误触发
+func resetTimer(t *time.Timer, d time.Duration) {
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
+	}
+	t.Reset(d)
 }
 
 // updatePacketContent 更新单个数据包的 Content 字段
@@ -1507,8 +1556,14 @@ func killProcess(proc *gorm.Process) {
 	if isProcessAlive(int(proc.Pid)) {
 		logger.Info("Process still alive, sending SIGKILL", zap.Int64("pid", proc.Pid))
 		if proc.Pid > 0 {
-			syscall.Kill(-int(proc.Pid), syscall.SIGKILL)
-			syscall.Kill(int(proc.Pid), syscall.SIGKILL)
+			err := syscall.Kill(-int(proc.Pid), syscall.SIGKILL)
+			if err != nil {
+				logger.Error("Failed to kill process group", zap.Int64("-pid", proc.Pid), zap.Error(err))
+			}
+			err = syscall.Kill(int(proc.Pid), syscall.SIGKILL)
+			if err != nil {
+				logger.Error("Failed to kill single process", zap.Int64("pid", proc.Pid), zap.Error(err))
+			}
 		}
 	}
 
