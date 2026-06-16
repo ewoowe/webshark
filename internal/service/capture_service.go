@@ -634,15 +634,42 @@ func buildCaptureCommand(host *gorm.Host, capture HostSingleCapture, pcapPath st
 	}
 	interfaceArg := strings.Join(interfaceArgs, " ")
 
-	bpfFilter := ""
-	if capture.BPFFilter != "" {
-		bpfFilter = fmt.Sprintf("'%s'", capture.BPFFilter)
-	}
+	bpfFilter := capture.BPFFilter
 
 	// tcpdump 命令：使用 -U 使输出无缓冲，-w - 输出到 stdout
 	// 注意：不要重定向 stderr，以便捕获错误信息
 	// 使用 sudo 提升权限以允许抓包
-	tcpdumpCmd := fmt.Sprintf("sudo tcpdump %s -U -w - %s", interfaceArg, bpfFilter)
+	// tcpdump 命令 + 祖先进程链监控：当 SSH 连接断开时自动终止 tcpdump
+	tcpdumpCmd := fmt.Sprintf(`sudo tcpdump %s -U -w - %s &
+TPID=$!
+# 1. 启动时快照：记录完整的父进程链
+ORIG_CHAIN=$(ps -o ppid= -p $PPID | tr -d " ")
+CUR=$ORIG_CHAIN
+while [ -n "$CUR" ] && [ "$CUR" != "1" ] && [ "$CUR" != "0" ]; do
+  NEXT=$(ps -o ppid= -p "$CUR" 2>/dev/null | tr -d " ")
+  [ -z "$NEXT" ] && break
+  ORIG_CHAIN="$ORIG_CHAIN $NEXT"
+  CUR=$NEXT
+done
+# 2. 每秒检测父进程链是否发生变化
+while kill -0 $TPID 2>/dev/null; do
+  NEW_CHAIN=$(ps -o ppid= -p $PPID | tr -d " ")
+  CUR=$NEW_CHAIN
+  while [ -n "$CUR" ] && [ "$CUR" != "1" ] && [ "$CUR" != "0" ]; do
+    NEXT=$(ps -o ppid= -p "$CUR" 2>/dev/null | tr -d " ")
+    [ -z "$NEXT" ] && break
+    NEW_CHAIN="$NEW_CHAIN $NEXT"
+    CUR=$NEXT
+  done
+  if [ "$NEW_CHAIN" != "$ORIG_CHAIN" ]; then
+    sudo kill $TPID 2>/dev/null
+    break
+  fi
+  sleep 1
+done
+# 3. 兜底：如果循环退出但 tcpdump 还活着，也杀掉
+kill -0 $TPID 2>/dev/null && sudo kill $TPID 2>/dev/null
+wait $TPID 2>/dev/null`, interfaceArg, bpfFilter)
 
 	// 2. 构建 ssh 命令
 	sshCmd := fmt.Sprintf("sshpass -p '%s' ssh -o StrictHostKeyChecking=no %s@%s '%s'",

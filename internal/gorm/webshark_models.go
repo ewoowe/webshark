@@ -46,7 +46,7 @@ type Task struct {
 	FilePath        string      `gorm:"column:file_path;type:varchar(256);not null;comment:抓包文件保存路径" json:"filePath"`
 	BpfFilter       string      `gorm:"column:bpf_filter;type:varchar(256);comment:BPF过滤条件" json:"bpfFilter"`
 	WiresharkFilter string      `gorm:"column:wireshark_filter;type:varchar(256);comment:Wireshark过滤条件" json:"wiresharkFilter"`
-	FullCommand     string      `gorm:"column:full_command;type:varchar(512);comment:完整的命令行" json:"fullCommand"`
+	FullCommand     string      `gorm:"column:full_command;type:text;comment:完整的命令行" json:"fullCommand"`
 	CreatedAt       time.Time   `gorm:"column:created_at;type:timestamp;default:CURRENT_TIMESTAMP;comment:任务开始时间" json:"createdAt"`
 	StopAt          *time.Time  `gorm:"column:stop_at;type:timestamp;comment:任务停止时间" json:"stopAt"`
 	TaskGroupId     int64       `gorm:"column:task_group_id;type:bigint;comment:任务组ID" json:"taskGroupId"`
@@ -103,7 +103,7 @@ type Process struct {
 	Pid     int64  `gorm:"column:pid;type:bigint;not null;comment:进程ID" json:"pid"`
 	Ppid    int64  `gorm:"column:ppid;type:bigint;not null;comment:父进程ID" json:"ppid"`
 	Type    string `gorm:"column:type;type:varchar(64);not null;comment:进程类型, sshpass, tshark, tee" json:"type"`
-	Command string `gorm:"column:command;type:varchar(512);not null;comment:进程命令行" json:"command"`
+	Command string `gorm:"column:command;type:text;comment:进程命令行" json:"command"`
 	Alive   bool   `gorm:"column:alive;type:boolean;not null;default:false;comment:进程是否存活" json:"alive"`
 	Message string `gorm:"column:message;type:varchar(1024);comment:进程状态下的额外消息，以;分隔" json:"message"`
 }
