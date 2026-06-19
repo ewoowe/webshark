@@ -640,36 +640,7 @@ func buildCaptureCommand(host *gorm.Host, capture HostSingleCapture, pcapPath st
 	// 注意：不要重定向 stderr，以便捕获错误信息
 	// 使用 sudo 提升权限以允许抓包
 	// tcpdump 命令 + 祖先进程链监控：当 SSH 连接断开时自动终止 tcpdump
-	tcpdumpCmd := fmt.Sprintf(`sudo tcpdump %s -U -w - %s &
-TPID=$!
-# 1. 启动时快照：记录完整的父进程链
-ORIG_CHAIN=$(ps -o ppid= -p $PPID | tr -d " ")
-CUR=$ORIG_CHAIN
-while [ -n "$CUR" ] && [ "$CUR" != "1" ] && [ "$CUR" != "0" ]; do
-  NEXT=$(ps -o ppid= -p "$CUR" 2>/dev/null | tr -d " ")
-  [ -z "$NEXT" ] && break
-  ORIG_CHAIN="$ORIG_CHAIN $NEXT"
-  CUR=$NEXT
-done
-# 2. 每秒检测父进程链是否发生变化
-while kill -0 $TPID 2>/dev/null; do
-  NEW_CHAIN=$(ps -o ppid= -p $PPID | tr -d " ")
-  CUR=$NEW_CHAIN
-  while [ -n "$CUR" ] && [ "$CUR" != "1" ] && [ "$CUR" != "0" ]; do
-    NEXT=$(ps -o ppid= -p "$CUR" 2>/dev/null | tr -d " ")
-    [ -z "$NEXT" ] && break
-    NEW_CHAIN="$NEW_CHAIN $NEXT"
-    CUR=$NEXT
-  done
-  if [ "$NEW_CHAIN" != "$ORIG_CHAIN" ]; then
-    sudo kill $TPID 2>/dev/null
-    break
-  fi
-  sleep 1
-done
-# 3. 兜底：如果循环退出但 tcpdump 还活着，也杀掉
-kill -0 $TPID 2>/dev/null && sudo kill $TPID 2>/dev/null
-wait $TPID 2>/dev/null`, interfaceArg, bpfFilter)
+	tcpdumpCmd := fmt.Sprintf(`sudo tcpdump %s -U -w - %s & SHELL_PID=$$; ORIG_PPID=$(ps -o ppid= -p $SHELL_PID | tr -d " "); sleep 0.5; CHILD_PIDS=$(pgrep -P $SHELL_PID | xargs); echo "[$(date)] INIT: SHELL_PID=$SHELL_PID ORIG_PPID=$ORIG_PPID CHILD_PIDS=[$CHILD_PIDS]" >> /tmp/tcpdump_debug.log; if [ -z "$CHILD_PIDS" ]; then CHILD_PIDS="0"; echo "[$(date)] WARN: CHILD_PIDS is empty, set to 0" >> /tmp/tcpdump_debug.log; fi; while [ "$CHILD_PIDS" != "0" ]; do NEW_PPID=$(ps -o ppid= -p $SHELL_PID | tr -d " "); if [ "$NEW_PPID" != "$ORIG_PPID" ]; then echo "[$(date)] DETECT: PPID changed from $ORIG_PPID to $NEW_PPID, killing children: $CHILD_PIDS" >> /tmp/tcpdump_debug.log; for pid in $CHILD_PIDS; do kill -TERM $pid 2>/dev/null && echo "[$(date)] KILL: sent TERM to pid $pid" >> /tmp/tcpdump_debug.log || echo "[$(date)] KILL: failed to kill pid $pid" >> /tmp/tcpdump_debug.log; done; break; fi; sleep 1; done; echo "[$(date)] EXIT: script exiting" >> /tmp/tcpdump_debug.log; wait`, interfaceArg, bpfFilter)
 
 	// 2. 构建 ssh 命令
 	sshCmd := fmt.Sprintf("sshpass -p '%s' ssh -o StrictHostKeyChecking=no %s@%s '%s'",
