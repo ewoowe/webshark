@@ -31,56 +31,42 @@ var packetNoCounter = struct {
 	counters: make(map[int64]*atomic.Int64),
 }
 
-// packetDetailCache 数据包详情缓存（用于处理时序问题）
+// packetDetailKey 缓存键
 type packetDetailKey struct {
 	TaskID      int64
 	FrameNumber int64
 }
 
-// cachedDetail 缓存的详情项（包含重试次数）
+// cachedDetail 缓存的详情项
 type cachedDetail struct {
-	Content    string
-	RetryCount int
-	MaxRetries int
+	Content string
 }
 
-var packetDetailCache = struct {
-	cache map[packetDetailKey]*cachedDetail
-	sync.RWMutex
-}{
-	cache: make(map[packetDetailKey]*cachedDetail),
-}
+// packetDetailCache 数据包详情缓存（用于处理时序问题）
+var packetDetailCache sync.Map
 
 // cachePacketDetail 缓存数据包详情
 func cachePacketDetail(taskID, frameNumber int64, content string) {
-	packetDetailCache.Lock()
-	defer packetDetailCache.Unlock()
 	key := packetDetailKey{TaskID: taskID, FrameNumber: frameNumber}
-
-	// 如果已存在，增加重试次数；否则创建新条目
-	if existing, exists := packetDetailCache.cache[key]; exists {
-		existing.RetryCount++
-		existing.Content = content // 更新为最新的压缩内容
+	if v, loaded := packetDetailCache.Load(key); loaded {
+		cached := v.(*cachedDetail)
+		cached.Content = content
 	} else {
-		packetDetailCache.cache[key] = &cachedDetail{
-			Content:    content,
-			RetryCount: 0,
-			MaxRetries: 10, // 最多重试10次（50秒）
-		}
+		packetDetailCache.Store(key, &cachedDetail{
+			Content: content,
+		})
 	}
 }
 
 // getAndRemoveCachedDetail 获取并删除缓存的数据包详情
-func getAndRemoveCachedDetail(taskID, frameNumber int64) (string, bool, int) {
-	packetDetailCache.Lock()
-	defer packetDetailCache.Unlock()
+func getAndRemoveCachedDetail(taskID, frameNumber int64) (string, bool) {
 	key := packetDetailKey{TaskID: taskID, FrameNumber: frameNumber}
-	cached, exists := packetDetailCache.cache[key]
-	if exists {
-		delete(packetDetailCache.cache, key)
-		return cached.Content, true, cached.RetryCount
+	v, loaded := packetDetailCache.LoadAndDelete(key)
+	if !loaded {
+		return "", false
 	}
-	return "", false, 0
+	cached := v.(*cachedDetail)
+	return cached.Content, true
 }
 
 // flushAllCachedDetailsForTask 清空并更新指定任务的所有缓存详情（用于停止任务时）
@@ -88,15 +74,15 @@ func flushAllCachedDetailsForTask(taskID int64) {
 	logger.Info("Flushing cached details for task",
 		zap.Int64("taskID", taskID))
 
-	// 获取该任务的所有缓存键
-	packetDetailCache.RLock()
+	// 收集该任务的键
 	keys := make([]packetDetailKey, 0)
-	for k := range packetDetailCache.cache {
-		if k.TaskID == taskID {
-			keys = append(keys, k)
+	packetDetailCache.Range(func(k, v interface{}) bool {
+		key := k.(packetDetailKey)
+		if key.TaskID == taskID {
+			keys = append(keys, key)
 		}
-	}
-	packetDetailCache.RUnlock()
+		return true
+	})
 
 	if len(keys) == 0 {
 		logger.Debug("No cached details to flush",
@@ -112,25 +98,20 @@ func flushAllCachedDetailsForTask(taskID int64) {
 	successCount := 0
 	failCount := 0
 	for _, key := range keys {
-		compressedContent, exists, _ := getAndRemoveCachedDetail(key.TaskID, key.FrameNumber)
+		compressedContent, exists := getAndRemoveCachedDetail(key.TaskID, key.FrameNumber)
 		if !exists {
 			continue
 		}
 
 		// 尝试更新（缓存中已是压缩后的数据）
-		if err := updatePacketContentWithCompressed(key.TaskID, key.FrameNumber, compressedContent); err != nil {
-			/*logger.Debug("Flush update packet content failed",
-			zap.Int64("taskID", key.TaskID),
-			zap.Int64("frameNumber", key.FrameNumber),
-			zap.Int("retryCount", retryCount),
-			zap.Error(err))*/
+		if rows, err := gorm.Repo.UpdatePacketContent(key.TaskID, key.FrameNumber, compressedContent); err != nil {
 			failCount++
 		} else {
-			/*logger.Debug("Flush update packet content succeeded",
-			zap.Int64("taskID", key.TaskID),
-			zap.Int64("frameNumber", key.FrameNumber),
-			zap.Int("retryCount", retryCount))*/
-			successCount++
+			if rows == 0 {
+				failCount++
+			} else {
+				successCount++
+			}
 		}
 	}
 
@@ -146,33 +127,31 @@ func retryCachedDetails() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		packetDetailCache.RLock()
-		keys := make([]packetDetailKey, 0, len(packetDetailCache.cache))
-		for k := range packetDetailCache.cache {
-			keys = append(keys, k)
-		}
-		packetDetailCache.RUnlock()
+		keys := make([]packetDetailKey, 0)
+		packetDetailCache.Range(func(k, v interface{}) bool {
+			keys = append(keys, k.(packetDetailKey))
+			return true
+		})
 
 		for _, key := range keys {
-			compressedContent, exists, retryCount := getAndRemoveCachedDetail(key.TaskID, key.FrameNumber)
+			compressedContent, exists := getAndRemoveCachedDetail(key.TaskID, key.FrameNumber)
 			if !exists {
 				continue
 			}
 
 			// 尝试更新（缓存中已是压缩后的数据）
-			if err := updatePacketContentWithCompressed(key.TaskID, key.FrameNumber, compressedContent); err != nil {
+			if rows, err := gorm.Repo.UpdatePacketContent(key.TaskID, key.FrameNumber, compressedContent); err != nil {
 				logger.Debug("Retry update packet content failed, re-caching",
 					zap.Int64("taskID", key.TaskID),
 					zap.Int64("frameNumber", key.FrameNumber),
-					zap.Int("retryCount", retryCount),
 					zap.Error(err))
-				// 重新放回缓存
+				// 异常，重新放回缓存
 				cachePacketDetail(key.TaskID, key.FrameNumber, compressedContent)
 			} else {
-				//logger.Debug("Retry update packet content succeeded",
-				//	zap.Int64("taskID", key.TaskID),
-				//	zap.Int64("frameNumber", key.FrameNumber),
-				//	zap.Int("retryCount", retryCount))
+				if rows == 0 {
+					// 未更新，重新放回缓存
+					cachePacketDetail(key.TaskID, key.FrameNumber, compressedContent)
+				}
 			}
 		}
 	}
@@ -827,12 +806,19 @@ func parseOverviewFromOutput(taskID, taskGroupID int64, stdout io.ReadCloser) {
 
 		// 检查缓存中是否有该数据包的详情，如果有则立即更新
 		go func(tid, fnum int64) {
-			if cachedContent, exists, _ := getAndRemoveCachedDetail(tid, fnum); exists {
-				if err := updatePacketContentWithCompressed(tid, fnum, cachedContent); err != nil {
+			if cachedContent, exists := getAndRemoveCachedDetail(tid, fnum); exists {
+				if rows, err := gorm.Repo.UpdatePacketContent(tid, fnum, cachedContent); err != nil {
 					logger.Debug("Update cached packet detail failed",
 						zap.Int64("taskID", tid),
 						zap.Int64("frameNumber", fnum),
 						zap.Error(err))
+					// 异常，重新缓存
+					cachePacketDetail(tid, fnum, cachedContent)
+				} else {
+					if rows == 0 {
+						// 未更新，重新缓存
+						cachePacketDetail(tid, fnum, cachedContent)
+					}
 				}
 			}
 		}(taskID, packet.FrameNumber)
@@ -1244,23 +1230,18 @@ func updatePacketContent(taskID int64, frameNumber int64, content string) error 
 	return savePacketContent(taskID, frameNumber, compressedContent)
 }
 
-// updatePacketContentWithCompressed 更新单个数据包的 Content 字段（直接使用已压缩的内容）
-func updatePacketContentWithCompressed(taskID int64, frameNumber int64, compressedContent string) error {
-	return savePacketContent(taskID, frameNumber, compressedContent)
-}
-
 // savePacketContent 保存数据包详情到数据库（内部辅助函数）
 func savePacketContent(taskID int64, frameNumber int64, compressedContent string) error {
+	// 先缓存数据包详情
+	cachePacketDetail(taskID, frameNumber, compressedContent)
 	// 直接尝试更新，通过 RowsAffected 判断记录是否存在
 	rowsAffected, err := gorm.Repo.UpdatePacketContent(taskID, frameNumber, compressedContent)
 	if err != nil {
 		return fmt.Errorf("failed to update packet content: %v", err)
 	}
-
-	// 如果没有更新任何行，说明数据包尚未写入，放入缓存等待重试
-	if rowsAffected == 0 {
-		cachePacketDetail(taskID, frameNumber, compressedContent)
-		return nil // 返回 nil 表示已缓存，不需要报错
+	// 如果更新了，删除缓存
+	if rowsAffected > 0 {
+		getAndRemoveCachedDetail(taskID, frameNumber)
 	}
 
 	return nil
